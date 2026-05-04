@@ -388,12 +388,12 @@
             const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "hr", hrId: id.trim(), password: hrPw }) });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) { setErr(data.error || "HR login failed"); return; }
-            onHrSuccess({ hrId: data.hrId || id.trim(), token: data.token });
+            await onHrSuccess({ hrId: data.hrId || id.trim(), token: data.token });
           } else {
             const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "candidate", email: id.trim(), password: pw.trim() }) });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) { setErr(data.error || "Invalid email or password"); return; }
-            onCandSuccess({ candidateId: data.candidateId, token: data.token });
+            await onCandSuccess({ candidateId: data.candidateId, token: data.token });
           }
         } catch (e) {
           setErr("Cannot reach server. Start backend (npm start) and check DATABASE_URL.");
@@ -437,7 +437,7 @@
                     </div>
                   )}
                   {err && <p className="text-red-400 text-sm">⚠ {err}</p>}
-                  <button type="button" onClick={submit} disabled={busy || !id.trim() || (role === "candidate" && !pw.trim()) || (role === "hr" && !hrPw.trim())} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">{busy ? "Authenticating…" : "Sign In →"}</button>
+                  <button type="button" onClick={submit} disabled={busy || !id.trim() || (role === "candidate" && !pw.trim()) || (role === "hr" && !hrPw.trim())} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">{busy ? "Logging in…" : "Sign In →"}</button>
                 </div>
                 {role === "candidate" && (
                   <div className="mt-6 pt-6 border-t border-slate-800 text-center space-y-2">
