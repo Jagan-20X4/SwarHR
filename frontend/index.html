@@ -764,16 +764,17 @@
               let showContinue = false;
               let locked = false;
               let extraCoolingLine = null;
-              if (j.userStatus === "cooling") {
+              const personal = authCandidate;
+              if (personal && j.userStatus === "cooling") {
                 locked = true;
                 coolingDays = j.coolingDaysLeft;
                 const st = getCoolingStatus(applicationHistory, j.id, cm);
                 if (!st.canApply && st.eligibleAt) extraCoolingLine = (<p className="text-xs text-amber-600 mt-2 font-medium">Last completed interview {fmtDate(st.lastCompletedAt || st.lastAppliedAt)}. Re-apply on {fmtDate(st.eligibleAt)} ({cm}-month cooling period).</p>);
-              } else if (j.userStatus === "interview_pending") {
+              } else if (personal && j.userStatus === "interview_pending") {
                 showContinue = true;
-              } else if (j.userStatus === "applied") {
+              } else if (personal && j.userStatus === "applied") {
                 showApplied = true;
-              } else if (j.userStatus === "open") {
+              } else if (personal && j.userStatus === "open") {
                 doApply = true;
               } else {
                 const status = getCoolingStatus(applicationHistory, j.id, cm);
@@ -1911,18 +1912,31 @@
           alert("Could not reach server.");
         }
       };
-      const logout = () => {
+      const logout = async () => {
         localStorage.removeItem(LS_TOKEN);
         localStorage.removeItem(LS_ROLE);
         localStorage.removeItem(LS_CANDIDATE_ID);
         localStorage.removeItem(LS_HR_ID);
-        setStep("HOME");
         setRole(null);
         setHrId(null);
         setActiveId(null);
         setSelJob(null);
         setCanPersist(false);
+        setCandidates([]);
+        setTalentPool([]);
+        setAuditLog([]);
         navigate("/");
+        setStep("HOME");
+        try {
+          const jRes = await fetch("/api/jobs");
+          if (jRes.ok) {
+            const jd = await jRes.json();
+            setJobs(jd.jobs || []);
+            if (jd.meta != null) setMeta(jd.meta);
+          }
+        } catch (e) {
+          console.error(e);
+        }
       };
 
       const handleApplyToJob = (job) => {
