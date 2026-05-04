@@ -1,0 +1,2213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Swar AI · Indira IVF Recruitment</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700;900&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js" crossorigin="anonymous"></script>
+  <style>
+    body { margin: 0; font-family: 'DM Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script>
+    // API calls go through Vite dev proxy → backend POST /api/messages (see frontend/vite.config.js)
+    // Set to "" to use mock AI responses without the backend
+    window.CLAUDE_API_URL = "/api/messages";
+    // Optional: host your own HR UI instead of the built-in HRDash (candidate flows unchanged).
+    //   HR_FRONTEND_MODE: "builtin" (default) | "iframe" | "redirect"
+    //   HR_FRONTEND_URL: full URL when mode is iframe or redirect
+    //   HR_PASS_SWAR_TOKEN: only if your HR app accepts the JWT in the query string (security risk if leaked in logs)
+    //   HR_TOKEN_QUERY_PARAM: query name for the token (default "token")
+    if (typeof window.HR_FRONTEND_MODE === "undefined") window.HR_FRONTEND_MODE = "builtin";
+    if (typeof window.HR_FRONTEND_URL === "undefined") window.HR_FRONTEND_URL = "";
+    if (typeof window.HR_PASS_SWAR_TOKEN === "undefined") window.HR_PASS_SWAR_TOKEN = false;
+    if (typeof window.HR_TOKEN_QUERY_PARAM === "undefined") window.HR_TOKEN_QUERY_PARAM = "token";
+  </script>
+  <script type="module">
+    window.__ATS_URL__ = import.meta.env.VITE_ATS_URL ?? "";
+  </script>
+
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    async function callClaude(messages, system = "", json = false) {
+      // If no API URL configured, return mock data (lets you preview the UI)
+      if (!window.CLAUDE_API_URL) {
+        await new Promise(r => setTimeout(r, 600));
+        if (json) return { overallScore: 72, summary: "Strong match with relevant experience.", recommendation: "shortlist", strengths: ["Domain knowledge", "Communication", "Problem solving"], areas: ["Stakeholder management", "Tech leadership", "Strategic thinking"], tech: 7, comm: 8, rec: "Hire" };
+        const lastUser = messages[messages.length - 1]?.content || "";
+        if (lastUser.includes("Start") || lastUser.includes("warm greeting")) return "Hello! Welcome to Indira IVF. To start, could you walk me through your most relevant experience for this role?";
+        return "Thank you for sharing that. Could you tell me about a challenging situation you handled and how you approached it?";
+      }
+      try {
+        const res = await fetch(window.CLAUDE_API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: system || undefined, messages }),
+        });
+        const data = await res.json();
+        const text = data.content?.find(b => b.type === "text")?.text || "";
+        if (json) { try { return JSON.parse(text.replace(/```json|```/g, "").trim()); } catch { return null; } }
+        return text;
+      } catch (e) {
+        console.error("API error:", e);
+        return json ? null : "I'm having trouble connecting right now. Please try again.";
+      }
+    }
+
+    const VALID_EXTS = ["jpg", "jpeg", "pdf", "doc", "docx"];
+
+    const SB = { REGISTERED: "bg-slate-100 text-slate-600", APPLIED: "bg-amber-100 text-amber-700", SHORTLISTED: "bg-blue-100 text-blue-700", INTERVIEWED: "bg-teal-100 text-teal-700", REJECTED: "bg-red-100 text-red-600", WITHDRAWN: "bg-purple-100 text-purple-700" };
+
+    const LS_TOKEN = "swar_token";
+    const LS_ROLE = "swar_role";
+    const LS_CANDIDATE_ID = "swar_candidate_id";
+    const LS_HR_ID = "swar_hr_id";
+
+    function authHeaders() {
+      const t = localStorage.getItem(LS_TOKEN);
+      return t ? { Authorization: "Bearer " + t } : {};
+    }
+
+    function parsePath(pathname, search) {
+      const q = new URLSearchParams(search || "");
+      const ret = q.get("returnTo") || "";
+      const path = pathname || "/";
+      if (path === "/" || path === "") return { name: "home", returnTo: ret };
+      if (path === "/login") return { name: "login", returnTo: ret };
+      if (path === "/register") return { name: "register", returnTo: ret };
+      if (path === "/portal") return { name: "portal", returnTo: ret };
+      if (path === "/hr") return { name: "hr", returnTo: ret };
+      if (path === "/cv-analyser") return { name: "cvAnalyser", returnTo: ret };
+      const m = path.match(/^\/jobs\/([^/]+)\/apply$/);
+      if (m) return { name: "apply", jobId: m[1], returnTo: ret };
+      return { name: "home", returnTo: ret };
+    }
+
+    function getHrExternalConfig() {
+      const rawUrl = typeof window.HR_FRONTEND_URL === "string" ? window.HR_FRONTEND_URL.trim() : "";
+      const mode = String(window.HR_FRONTEND_MODE || "builtin").toLowerCase();
+      if (!rawUrl) return { useExternal: false, mode: "builtin", url: "" };
+      if (mode !== "iframe" && mode !== "redirect") return { useExternal: false, mode: "builtin", url: rawUrl };
+      return { useExternal: true, mode, url: rawUrl };
+    }
+
+    function HRBridge({ children, onLogout }) {
+      const { useExternal, mode, url } = getHrExternalConfig();
+      if (!useExternal) return children;
+      if (mode === "redirect") return <HRRedirectOnce href={url} />;
+      return <HRIframeShell baseUrl={url} onLogout={onLogout} />;
+    }
+
+    function HRRedirectOnce({ href }) {
+      useEffect(() => {
+        let dest = href;
+        if (window.HR_PASS_SWAR_TOKEN === true) {
+          const t = localStorage.getItem(LS_TOKEN);
+          if (t) {
+            const param = (typeof window.HR_TOKEN_QUERY_PARAM === "string" && window.HR_TOKEN_QUERY_PARAM.trim()) || "token";
+            const sep = href.includes("?") ? "&" : "?";
+            dest = href + sep + param + "=" + encodeURIComponent(t);
+          }
+        }
+        window.location.replace(dest);
+      }, [href]);
+      return (
+        <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-3 p-6">
+          <div className="w-10 h-10 border-4 border-indigo-800 border-t-indigo-400 rounded-full animate-spin"/>
+          <p className="text-slate-400 text-sm">Redirecting to HR workspace…</p>
+        </div>
+      );
+    }
+
+    function HRIframeShell({ baseUrl, onLogout }) {
+      const param = (typeof window.HR_TOKEN_QUERY_PARAM === "string" && window.HR_TOKEN_QUERY_PARAM.trim()) || "token";
+      const qs = window.HR_PASS_SWAR_TOKEN === true ? (() => {
+        const t = localStorage.getItem(LS_TOKEN);
+        if (!t) return "";
+        const sep = baseUrl.includes("?") ? "&" : "?";
+        return sep + param + "=" + encodeURIComponent(t);
+      })() : "";
+      const src = baseUrl + qs;
+      return (
+        <div className="min-h-screen flex flex-col bg-slate-950">
+          <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-slate-800 bg-slate-900 text-white">
+            <span className="text-sm font-bold tracking-tight">Swar AI · HR</span>
+            <button type="button" onClick={onLogout} className="text-xs font-bold text-slate-300 hover:text-white underline">Logout</button>
+          </div>
+          <iframe title="HR workspace" src={src} className="flex-1 w-full min-h-0 border-0 bg-white" style={{ height: "calc(100vh - 52px)" }} />
+        </div>
+      );
+    }
+
+    function fmtDate(d) { try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); } catch { return "—"; } }
+    function fmtDateTime(iso) {
+      try {
+        return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+      } catch {
+        return "—";
+      }
+    }
+    function fmtSize(b) { return b < 1024 ? b + " B" : b < 1048576 ? (b / 1024).toFixed(1) + " KB" : (b / 1048576).toFixed(2) + " MB"; }
+    function fileIcon(ext) { return ext === "pdf" ? "📕" : (ext === "docx" || ext === "doc") ? "📘" : "🖼️"; }
+
+    function getLatestAppForJob(history, jobId) {
+      const past = (history || []).filter((a) => a.jobId === jobId);
+      if (past.length === 0) return null;
+      return [...past].sort((a, b) => new Date(b.appliedAt) - new Date(a.appliedAt))[0];
+    }
+
+    function patchLatestApp(history, jobId, patch) {
+      const h = [...(history || [])];
+      let bestI = -1;
+      let bestT = 0;
+      h.forEach((a, i) => {
+        if (a.jobId !== jobId) return;
+        const t = new Date(a.appliedAt).getTime();
+        if (t >= bestT) {
+          bestT = t;
+          bestI = i;
+        }
+      });
+      if (bestI < 0) return history;
+      h[bestI] = { ...h[bestI], ...patch };
+      return h;
+    }
+
+    function getCoolingStatus(history, jobId, coolingMonths) {
+      const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
+      const past = (history || []).filter((a) => a.jobId === jobId);
+      if (past.length === 0) return { canApply: true, hasApplied: false };
+      const last = [...past].sort((a, b) => new Date(b.appliedAt) - new Date(a.appliedAt))[0];
+      if (!last.interviewCompletedAt) {
+        return { canApply: false, hasApplied: true, pendingInterview: true, lastAppliedAt: last.appliedAt };
+      }
+      const eligible = new Date(last.interviewCompletedAt);
+      eligible.setMonth(eligible.getMonth() + cm);
+      const now = new Date();
+      if (now >= eligible) return { canApply: true, hasApplied: true, lastAppliedAt: last.appliedAt, lastCompletedAt: last.interviewCompletedAt };
+      const daysRemaining = Math.ceil((eligible - now) / 86400000);
+      return { canApply: false, hasApplied: true, daysRemaining, eligibleAt: eligible.toISOString(), lastAppliedAt: last.appliedAt, lastCompletedAt: last.interviewCompletedAt };
+    }
+
+    async function processResumeFile(file, maxMb) {
+      const mb = typeof maxMb === "number" ? maxMb : 5;
+      if (!file) throw new Error("No file selected.");
+      const name = file.name || "resume";
+      const ext = (name.includes(".") ? name.split(".").pop() : "").toLowerCase();
+      if (!VALID_EXTS.includes(ext)) throw new Error(`Unsupported format. Only JPG, JPEG, PDF, DOC, and DOCX accepted. You uploaded: .${ext || "unknown"}`);
+      if (file.size > mb * 1024 * 1024) throw new Error(`File exceeds ${mb} MB limit. Your file is ${fmtSize(file.size)}.`);
+      const dataUrl = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(new Error("Could not read file."));
+        r.readAsDataURL(file);
+      });
+      let cvText = "";
+      if (ext === "docx" && window.mammoth) {
+        try {
+          const buffer = await file.arrayBuffer();
+          const result = await window.mammoth.extractRawText({ arrayBuffer: buffer });
+          cvText = (result?.value || "").trim() || `[Word document: ${name}]`;
+        } catch { cvText = `[Word document: ${name} — extraction failed]`; }
+      } else if (ext === "doc") cvText = `[Legacy Word: ${name}]`;
+      else if (ext === "pdf") cvText = `[PDF resume: ${name}]`;
+      else cvText = `[Image resume: ${name}]`;
+      return { name, mime: file.type || `image/${ext}`, ext, size: file.size, dataUrl, cvText };
+    }
+
+    function downloadDataUrl(dataUrl, filename) {
+      const a = document.createElement("a");
+      a.href = dataUrl; a.download = filename;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
+
+    function dataUrlToBlobUrl(dataUrl) {
+      if (!dataUrl || !dataUrl.startsWith("data:")) return null;
+      try {
+        const parts = dataUrl.split(",");
+        const base64 = parts[1];
+        if (base64 == null) return null;
+        const mimeMatch = parts[0].match(/data:(.*?)(;|$)/);
+        const mime = mimeMatch ? mimeMatch[1] : "application/octet-stream";
+        const binary = atob(base64);
+        const len = binary.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
+        return URL.createObjectURL(new Blob([bytes], { type: mime }));
+      } catch {
+        return null;
+      }
+    }
+
+    function Badge() { return <span className="inline-flex items-center gap-1 text-xs font-bold text-indigo-600 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-full">🛡 DPDPA</span>; }
+    function Spin({ label = "Loading…" }) { return <div className="flex flex-col items-center justify-center py-20 gap-4"><div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"/><p className="text-slate-500 text-sm animate-pulse">{label}</p></div>; }
+
+    function Modal({ title, children, onClose, wide }) {
+      return (
+        <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4" onClick={onClose}>
+          <div className={`bg-white rounded-2xl shadow-2xl w-full ${wide ? "max-w-2xl" : "max-w-md"} max-h-screen overflow-y-auto`} onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-100 sticky top-0 bg-white z-10">
+              <h2 className="font-bold text-slate-800">{title}</h2>
+              {onClose && <button onClick={onClose} className="text-slate-400 hover:text-slate-700 w-8 h-8 rounded-full hover:bg-slate-100 flex items-center justify-center">✕</button>}
+            </div>
+            <div className="p-6">{children}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function PrivacyModal({ onClose, coolingMonths, dpo }) {
+      const cm = coolingMonths ?? 3;
+      const d = dpo || { name: "DPO", email: "", phone: "" };
+      return (
+        <Modal title="Privacy Policy" onClose={onClose} wide>
+          <p className="text-xs text-slate-400 mb-4">DPDPA 2023 & DPDP Rules 2025</p>
+          {[
+            ["1. Data Fiduciary", "Indira IVF Hospital Pvt. Ltd. (§2(j))."],
+            ["2. Legal Basis", "Explicit consent (§6) and employment legitimate use (§7)."],
+            ["3. Third-Party Sharing", "Anthropic, Inc. (USA) via Claude API for AI screening only. Not retained."],
+            ["4. Talent Pool", `CVs stored independently. Authorized HR SPOCs only. Access logged (§8).`],
+            ["5. Cooling Period", `${cm}-month cooling period between applications to the same role.`],
+            ["6. Your Rights", "§11 Access · §12 Correction & Erasure · §6(4) Withdraw · §13 Grievance · §14 Nominate."],
+            ["7. Grievance Officer", `${d.name} · ${d.email} · ${d.phone}. 7-day SLA. Escalate to dpb.gov.in.`],
+          ].map(([h, b]) => <div key={h} className="mb-4"><h3 className="font-bold text-slate-900 text-sm mb-1">{h}</h3><p className="text-slate-600 text-sm leading-relaxed">{b}</p></div>)}
+        </Modal>
+      );
+    }
+
+    function ForgotPassword({ candidates, onReset, onBack }) {
+      const [phase, setPhase] = useState("email"), [email, setEmail] = useState(""), [newPw, setNewPw] = useState(""), [confirmPw, setConfirmPw] = useState(""), [err, setErr] = useState("");
+      const find = () => { setErr(""); const u = candidates.find(c => c.email.toLowerCase() === email.trim().toLowerCase()); if (!u) { setErr("No account found."); return; } setPhase("reset"); };
+      const reset = () => { setErr(""); if (newPw.length < 6) { setErr("Min. 6 characters."); return; } if (newPw !== confirmPw) { setErr("Passwords don't match."); return; } onReset(email.trim().toLowerCase(), newPw); setPhase("done"); };
+      return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+          <div className="w-full max-w-md">
+            <button onClick={onBack} className="text-slate-400 hover:text-white mb-6 text-sm">← Back to Login</button>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
+              {phase === "done" ? (
+                <div className="text-center py-4">
+                  <div className="w-16 h-16 bg-green-900/40 text-green-400 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">✓</div>
+                  <h2 className="text-2xl font-black text-white mb-2">Password Reset!</h2>
+                  <button onClick={onBack} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl">Back to Login →</button>
+                </div>
+              ) : (
+                <>
+                  <div className="mb-6">
+                    <div className="w-12 h-12 bg-indigo-900/50 border border-indigo-700 rounded-xl flex items-center justify-center mb-4 text-2xl">🔑</div>
+                    <h1 className="text-2xl font-black text-white mb-1">{phase === "email" ? "Forgot Password?" : "Reset Password"}</h1>
+                  </div>
+                  {phase === "email" ? (
+                    <div className="space-y-4">
+                      <input type="email" value={email} onChange={e => { setEmail(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && find()} placeholder="your@email.com" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"/>
+                      {err && <p className="text-red-400 text-sm">⚠ {err}</p>}
+                      <button onClick={find} disabled={!email.trim()} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">Continue →</button>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <input type="password" value={newPw} onChange={e => { setNewPw(e.target.value); setErr(""); }} placeholder="New password (min 6)" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"/>
+                      <input type="password" value={confirmPw} onChange={e => { setConfirmPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && reset()} placeholder="Confirm password" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"/>
+                      {err && <p className="text-red-400 text-sm">⚠ {err}</p>}
+                      <button onClick={reset} disabled={!newPw || !confirmPw} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">Reset →</button>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function ConsentScreen({ onAccept, onDecline, dataCategories, coolingMonths, dpo }) {
+      const [agreed, setAgreed] = useState(false);
+      const [showPolicy, setShowPolicy] = useState(false);
+      const cats = dataCategories && dataCategories.length > 0 ? dataCategories : [];
+      return (
+        <>
+          {showPolicy && <PrivacyModal onClose={() => setShowPolicy(false)} coolingMonths={coolingMonths} dpo={dpo}/>}
+          <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+            <div className="w-full max-w-lg bg-slate-900 border border-slate-700 rounded-2xl overflow-hidden shadow-2xl">
+              <div className="bg-indigo-700 px-6 py-5">
+                <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center font-black text-white text-sm">S</div><Badge/></div>
+                <h1 className="text-xl font-black text-white">Consent & Privacy Notice</h1>
+                <p className="text-indigo-200 text-xs mt-1">§5 & §6, DPDPA 2023</p>
+              </div>
+              <div className="p-6 space-y-3">
+                <p className="text-slate-300 text-sm">Data we will process for your recruitment:</p>
+                <div className="space-y-2">
+                  {cats.map(d => (
+                    <div key={d.id} className="flex gap-3 p-3 rounded-xl border border-slate-700 bg-slate-800/50">
+                      <div className="w-5 h-5 rounded-full bg-indigo-900/50 border border-indigo-600 flex items-center justify-center shrink-0 mt-0.5">
+                        <svg className="w-3 h-3 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7"/></svg>
+                      </div>
+                      <div>
+                        <p className="text-white text-sm font-semibold">{d.label}</p>
+                        <p className="text-slate-400 text-xs">{d.items}</p>
+                        <p className="text-indigo-300 text-xs mt-0.5"><b>Purpose:</b> {d.purpose}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <label className={`flex gap-3 p-4 rounded-xl border cursor-pointer transition-all mt-4 ${agreed ? "border-indigo-500 bg-indigo-900/30" : "border-slate-700 bg-slate-800/50"}`}>
+                  <input type="checkbox" checked={agreed} onChange={() => setAgreed(!agreed)} className="mt-0.5 w-5 h-5 accent-indigo-500 shrink-0"/>
+                  <div><p className="text-white text-sm font-bold">I consent to all of the above</p><p className="text-slate-400 text-xs mt-0.5">I agree to processing of my data and confirm I am 18+ (§9 DPDPA).</p></div>
+                </label>
+                <p className="text-slate-500 text-xs">By proceeding you confirm you have read our <button onClick={() => setShowPolicy(true)} className="text-indigo-400 underline">Privacy Policy</button>.</p>
+                <div className="flex gap-3 pt-1">
+                  <button onClick={onDecline} className="flex-1 py-3 border border-slate-600 text-slate-400 font-bold rounded-xl hover:bg-slate-800 text-sm">Decline</button>
+                  <button onClick={() => agreed && onAccept(cats.map(d => d.id))} disabled={!agreed || cats.length === 0} className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl text-sm">I Consent →</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      );
+    }
+
+    function Login({ onCandSuccess, onHrSuccess, onRegister, onForgot, coolingMonths, dpo }) {
+      const [role, setRole] = useState("candidate"), [id, setId] = useState(""), [pw, setPw] = useState(""), [hrPw, setHrPw] = useState(""), [err, setErr] = useState(""), [busy, setBusy] = useState(false), [showPw, setShowPw] = useState(false), [showP, setShowP] = useState(false);
+      const submit = async () => {
+        setErr("");
+        if (role === "candidate" && (!id.trim() || !pw.trim())) return;
+        if (role === "hr" && (!id.trim() || !hrPw.trim())) { setErr("Enter Corporate AD ID and password."); return; }
+        setBusy(true);
+        try {
+          if (role === "hr") {
+            const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "hr", hrId: id.trim(), password: hrPw }) });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { setErr(data.error || "HR login failed"); return; }
+            onHrSuccess({ hrId: data.hrId || id.trim(), token: data.token });
+          } else {
+            const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ role: "candidate", email: id.trim(), password: pw.trim() }) });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) { setErr(data.error || "Invalid email or password"); return; }
+            onCandSuccess({ candidateId: data.candidateId, token: data.token });
+          }
+        } catch (e) {
+          setErr("Cannot reach server. Start backend (npm start) and check DATABASE_URL.");
+        } finally {
+          setBusy(false);
+        }
+      };
+      return (
+        <>
+          {showP && <PrivacyModal onClose={() => setShowP(false)} coolingMonths={coolingMonths} dpo={dpo}/>}
+          <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+            <div className="w-full max-w-md">
+              <div className="text-center mb-8">
+                <div className="w-14 h-14 bg-indigo-600 rounded-2xl mx-auto flex items-center justify-center mb-4 shadow-2xl"><span className="text-white text-2xl font-black">S</span></div>
+                <h1 className="text-3xl font-black text-white">Swar AI</h1>
+                <p className="text-slate-400 text-sm mt-1">Recruitment Intelligence Platform</p>
+                <div className="mt-2 flex justify-center"><Badge/></div>
+              </div>
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 shadow-2xl">
+                <div className="flex rounded-xl overflow-hidden mb-6 border border-slate-700">
+                  {["candidate", "hr"].map(r => <button key={r} onClick={() => { setRole(r); setErr(""); setId(""); setPw(""); setHrPw(""); }} className={`flex-1 py-2.5 text-sm font-bold capitalize transition-all ${role === r ? "bg-indigo-600 text-white" : "text-slate-400 hover:text-white"}`}>{r === "hr" ? "HR Admin" : "Candidate"}</button>)}
+                </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">{role === "hr" ? "Corporate AD ID" : "Email"}</label>
+                    <input type={role === "hr" ? "text" : "email"} value={id} onChange={e => { setId(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder={role === "hr" ? "HR-TM-001" : "your@email.com"} className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"/>
+                  </div>
+                  {role === "candidate" && (
+                    <div>
+                      <div className="flex items-center justify-between mb-2"><label className="text-xs font-bold text-slate-400 uppercase tracking-wider">Password</label><button type="button" onClick={onForgot} className="text-xs text-indigo-400 font-medium">Forgot?</button></div>
+                      <div className="relative">
+                        <input type={showPw ? "text" : "password"} value={pw} onChange={e => { setPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="••••••••" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500 pr-16"/>
+                        <button type="button" onClick={() => setShowPw(!showPw)} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs font-bold">{showPw ? "HIDE" : "SHOW"}</button>
+                      </div>
+                    </div>
+                  )}
+                  {role === "hr" && (
+                    <div>
+                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Password</label>
+                      <input type="password" value={hrPw} onChange={e => { setHrPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="HR password (see README)" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/>
+                    </div>
+                  )}
+                  {err && <p className="text-red-400 text-sm">⚠ {err}</p>}
+                  <button type="button" onClick={submit} disabled={busy || !id.trim() || (role === "candidate" && !pw.trim()) || (role === "hr" && !hrPw.trim())} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">{busy ? "Authenticating…" : "Sign In →"}</button>
+                </div>
+                {role === "candidate" && (
+                  <div className="mt-6 pt-6 border-t border-slate-800 text-center space-y-2">
+                    <p className="text-slate-500 text-sm">New here? <button type="button" onClick={onRegister} className="text-indigo-400 font-bold">Register</button></p>
+                    <p className="text-slate-600 text-xs">Demo user after DB seed: john@example.com / password123</p>
+                  </div>
+                )}
+                <div className="mt-4 pt-4 border-t border-slate-800 text-center"><button type="button" onClick={() => setShowP(true)} className="text-xs text-slate-500 underline">Privacy Policy</button></div>
+              </div>
+            </div>
+          </div>
+        </>
+      );
+    }
+
+    function HRDash({ candidates, jobs, talentPool, auditLog, onView, onInterview, onAnalysis, onCvAnalyser, onJobs, onScreen, onTalentPool, onAuditLog, onLogout }) {
+      const [filter, setFilter] = useState("ALL");
+      const stats = [{ l: "Total", v: candidates.length, s: "ALL" }, { l: "Applied", v: candidates.filter(c => c.status === "APPLIED").length, s: "APPLIED" }, { l: "Shortlisted", v: candidates.filter(c => c.status === "SHORTLISTED").length, s: "SHORTLISTED" }, { l: "Interviewed", v: candidates.filter(c => c.status === "INTERVIEWED").length, s: "INTERVIEWED" }, { l: "Rejected", v: candidates.filter(c => c.status === "REJECTED").length, s: "REJECTED" }];
+      const jt = id => jobs.find(j => j.id === id)?.title || "—";
+      const schedFor = (c) => getLatestAppForJob(c.applicationHistory, c.jobId)?.interviewScheduledAt;
+      const filtered = filter === "ALL" ? candidates : candidates.filter(c => c.status === filter);
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-3"><div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-black text-sm">S</div><span className="font-bold">HR Portal</span><Badge/></div>
+            <div className="flex gap-2 flex-wrap">
+              <button type="button" onClick={onCvAnalyser} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">CV Analyser</button>
+              <button onClick={onJobs} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">Jobs</button>
+              <button onClick={onTalentPool} className="px-3 py-1.5 bg-purple-700 hover:bg-purple-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">🌟 Talent Pool ({talentPool.length})</button>
+              <button onClick={onScreen} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">Screen</button>
+              <button onClick={onAuditLog} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">📋 Audit</button>
+              <button type="button" onClick={onLogout} className="px-3 py-1.5 bg-red-900/50 hover:bg-red-900 text-red-300 rounded-lg text-sm font-medium">Logout</button>
+            </div>
+          </div>
+          <div className="max-w-6xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-1">Recruitment Dashboard</h1>
+            <p className="text-slate-500 text-sm mb-6">Click any stat or candidate to drill in.</p>
+            <div className="grid grid-cols-5 gap-4 mb-6">{stats.map(s => <button key={s.l} onClick={() => setFilter(s.s)} className={`text-left bg-white rounded-2xl p-5 border shadow-sm transition-all hover:shadow-md ${filter === s.s ? "border-indigo-400 ring-2 ring-indigo-100" : "border-slate-100"}`}><p className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-1">{s.l}</p><p className="text-3xl font-black text-slate-900">{s.v}</p></button>)}</div>
+            <div className="flex items-center justify-between mb-4"><h2 className="text-xl font-bold text-slate-800">Candidates {filter !== "ALL" && <span className="text-sm text-slate-500 font-normal">· {filter}</span>}</h2>{filter !== "ALL" && <button onClick={() => setFilter("ALL")} className="text-xs text-indigo-600 font-bold">Clear ✕</button>}</div>
+            {filtered.length === 0 ? <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 py-16 text-center"><p className="text-slate-400">No candidates.</p></div> : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">{filtered.map(c => (
+                <div key={c.id} className="bg-white rounded-2xl border border-slate-200 p-5 hover:shadow-lg hover:border-indigo-200 transition-all cursor-pointer" onClick={() => onView(c.id)}>
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-3"><div className="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-black text-lg">{c.name[0]}</div><div><p className="font-bold text-slate-900">{c.name}</p><p className="text-xs text-slate-400">{c.email}</p></div></div>
+                    <span className={`text-xs font-black uppercase px-2 py-1 rounded-lg ${SB[c.status] || "bg-slate-100"}`}>{c.status}</span>
+                  </div>
+                  <p className="text-sm font-semibold text-slate-700 mb-1">{jt(c.jobId)}</p>
+                  {schedFor(c) ? <p className="text-xs font-bold text-teal-700 mb-2">📅 Interview scheduled: {fmtDateTime(schedFor(c))}</p> : null}
+                  <div className="flex items-center gap-2 mb-3 flex-wrap">
+                    <div className={`text-xs font-bold px-2 py-1 rounded-lg ${c.consent ? "bg-green-50 text-green-600" : "bg-red-50 text-red-500"}`}>{c.consent ? "✓ Consent" : "⚠ No consent"}</div>
+                    {c.transcript && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-teal-50 text-teal-600">🎤 Done</div>}
+                    {c.fromTalentPool && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-amber-50 text-amber-700">🌟 Pool</div>}
+                    {(c.applicationHistory || []).length > 1 && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-slate-100 text-slate-600">{c.applicationHistory.length} apps</div>}
+                  </div>
+                  <div className="flex gap-2 pt-3 border-t border-slate-100" onClick={e => e.stopPropagation()}>
+                    <button onClick={() => onView(c.id)} className="flex-1 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg">View</button>
+                    {c.consent && !(c.transcript && c.transcript.length > 0) && (c.status === "SHORTLISTED" || c.status === "APPLIED") && (
+                      <button onClick={() => onInterview(c.id)} className="flex-1 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg">Start interview</button>
+                    )}
+                    {(c.status === "INTERVIEWED" || c.analysis) && <button onClick={() => onAnalysis(c.id)} className="flex-1 py-2 bg-teal-600 text-white text-xs font-bold rounded-lg">Analysis</button>}
+                  </div>
+                </div>
+              ))}</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnalysis, onBack }) {
+      const [showCV, setShowCV] = useState(false), [showTranscript, setShowTranscript] = useState(true), [remarks, setRemarks] = useState(candidate.remarks || ""), [flash, setFlash] = useState("");
+      const appliedList = (candidate.applicationHistory || []).map(a => ({ ...a, job: jobs.find(j => j.id === a.jobId) })).filter(a => a.job);
+      const setStatus = (s) => { onUpdate({ status: s, remarks }); setFlash(`Updated to ${s}`); setTimeout(onBack, 800); };
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Candidate Details</span><Badge/></div>
+          <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
+            {flash && <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-xl text-sm">✓ {flash}</div>}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex items-start justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-4">
+                <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl font-black">{candidate.name[0]}</div>
+                <div><h1 className="text-2xl font-black text-slate-900">{candidate.name}</h1><p className="text-slate-500 text-sm">{candidate.email}</p><p className="text-xs text-slate-400 mt-1">{candidate.id}{candidate.fromTalentPool && " · 🌟 From Talent Pool"}</p></div>
+              </div>
+              <span className={`text-xs font-black uppercase px-3 py-1.5 rounded-lg ${SB[candidate.status] || "bg-slate-100"}`}>{candidate.status}</span>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+              <h2 className="text-xs font-black text-slate-400 uppercase mb-3">DPDPA Consent</h2>
+              {candidate.consent ? <p className="text-sm text-slate-700">✓ Granted on {fmtDate(candidate.consentAt)}</p> : <p className="text-sm text-red-700">⚠ No consent — cannot process per §6</p>}
+            </div>
+            {appliedList.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                <h2 className="text-xs font-black text-slate-400 uppercase mb-3">Application History ({appliedList.length})</h2>
+                <div className="space-y-2">{appliedList.map((a, i) => <div key={i} className={`flex items-center justify-between p-3 rounded-xl ${a.jobId === candidate.jobId ? "bg-indigo-50 border border-indigo-200" : "bg-slate-50"}`}><div><p className="font-bold text-slate-900 text-sm">{a.job.title}</p><p className="text-xs text-slate-500">{a.job.location} · Applied {fmtDate(a.appliedAt)}</p>{a.interviewScheduledAt ? <p className="text-xs text-teal-700 font-semibold mt-0.5">Scheduled: {fmtDateTime(a.interviewScheduledAt)}</p> : null}</div>{a.jobId === candidate.jobId && <span className="text-xs font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">Active</span>}</div>)}</div>
+              </div>
+            )}
+            {candidate.cv && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                <button onClick={() => setShowCV(!showCV)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">CV / Resume {candidate.cvFile && `(${candidate.cvFile.ext.toUpperCase()})`}</h2><span className="text-indigo-500 text-xs font-bold">{showCV ? "▲ Hide" : "▼ Show"}</span></button>
+                {showCV && (
+                  <div className="mt-4 bg-slate-50 rounded-xl p-4 border border-slate-100">
+                    {candidate.cvFile && (
+                      <div className="flex items-center justify-between mb-3 pb-3 border-b border-slate-200">
+                        <div className="flex items-center gap-2 text-sm"><span className="text-2xl">{fileIcon(candidate.cvFile.ext)}</span><div><p className="font-bold text-slate-800">{candidate.cvFile.name}</p><p className="text-xs text-slate-500">{fmtSize(candidate.cvFile.size)}</p></div></div>
+                        <button onClick={() => downloadDataUrl(candidate.cvFile.dataUrl, candidate.cvFile.name)} className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg">⬇ Download</button>
+                      </div>
+                    )}
+                    <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans">{candidate.cv}</pre>
+                  </div>
+                )}
+              </div>
+            )}
+            {candidate.transcript && candidate.transcript.length > 0 && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                <button onClick={() => setShowTranscript(!showTranscript)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">Interview · {candidate.transcript.length} msgs · {candidate.lang || "English"}</h2><span className="text-indigo-500 text-xs font-bold">{showTranscript ? "▲" : "▼"}</span></button>
+                {showTranscript && <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">{candidate.transcript.map((e, i) => <div key={i} className={`flex ${e.role === "ai" ? "justify-start" : "justify-end"}`}><div className={`max-w-md p-3 rounded-2xl text-sm ${e.role === "ai" ? "bg-slate-100 text-slate-800" : "bg-indigo-600 text-white"}`}><p className="text-xs uppercase font-black mb-1 opacity-50">{e.role === "ai" ? "Swar" : "Candidate"}</p>{e.text}</div></div>)}</div>}
+              </div>
+            )}
+            {candidate.analysis && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                <div className="flex items-center justify-between mb-3"><h2 className="text-xs font-black text-slate-400 uppercase">AI Analysis</h2><span className="px-3 py-1 rounded-lg text-white font-black text-xs bg-indigo-600">{candidate.analysis.rec}</span></div>
+                <p className="text-slate-700 text-sm mb-3">{candidate.analysis.summary}</p>
+                <div className="grid grid-cols-2 gap-3"><div className="bg-indigo-50 rounded-xl p-3"><p className="text-xs text-indigo-500 font-bold mb-1">Technical</p><p className="text-2xl font-black text-indigo-700">{candidate.analysis.tech}/10</p></div><div className="bg-teal-50 rounded-xl p-3"><p className="text-xs text-teal-500 font-bold mb-1">Communication</p><p className="text-2xl font-black text-teal-700">{candidate.analysis.comm}/10</p></div></div>
+              </div>
+            )}
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+              <h2 className="text-xs font-black text-slate-400 uppercase mb-3">HR Actions</h2>
+              <textarea rows={2} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
+              <div className="grid grid-cols-2 gap-2">
+                {candidate.consent && candidate.status === "APPLIED" && <button onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
+                {candidate.consent && !(candidate.transcript && candidate.transcript.length > 0) && (candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && <button onClick={onInterview} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
+                {(candidate.status === "INTERVIEWED" || candidate.analysis) && <button onClick={onAnalysis} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>}
+                {candidate.status !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button onClick={() => { if (window.confirm("Reject?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function JobMaster({ jobs, onSave, onBack }) {
+      const [local, setLocal] = useState(jobs), [edit, setEdit] = useState(null), [form, setForm] = useState({ title: "", designation: "", location: "", description: "", requirements: "" }), [saved, setSaved] = useState(false);
+      const saveJob = () => { if (!form.title.trim()) return; edit === "new" ? setLocal(p => [...p, { ...form, id: "j-" + Date.now() }]) : setLocal(p => p.map(j => j.id === edit ? { ...j, ...form } : j)); setEdit(null); };
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between"><div className="flex items-center gap-3"><button onClick={() => { onSave(local); onBack(); }} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Job Master</span></div><button onClick={() => { onSave(local); setSaved(true); setTimeout(() => setSaved(false), 2000); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold ${saved ? "bg-green-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>{saved ? "✓ Saved" : "Save"}</button></div>
+          <div className="max-w-4xl mx-auto px-6 py-8">
+            <div className="flex items-center justify-between mb-6"><h1 className="text-2xl font-black text-slate-900">Job Postings</h1><button onClick={() => { setForm({ title: "", designation: "", location: "", description: "", requirements: "" }); setEdit("new"); }} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">+ New</button></div>
+            {edit && (
+              <div className="bg-white rounded-2xl border border-indigo-200 shadow-lg p-6 mb-6">
+                <div className="grid grid-cols-2 gap-4 mb-4">{[["title", "Title"], ["designation", "Designation"], ["location", "Location"]].map(([k, l]) => <div key={k}><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><input value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/></div>)}</div>
+                {[["description", "Description"], ["requirements", "Requirements"]].map(([k, l]) => <div key={k} className="mb-4"><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><textarea value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none"/></div>)}
+                <div className="flex gap-3"><button onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg">Save</button><button onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
+              </div>
+            )}
+            <div className="space-y-4">{local.map(j => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p></div><div className="flex gap-2 ml-4 shrink-0"><button onClick={() => { setForm(j); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button onClick={() => setLocal(p => p.filter(x => x.id !== j.id))} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg">Remove</button></div></div>)}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function CandReg({ onRegister, onBack }) {
+      const [f, setF] = useState({ name: "", email: "", password: "" });
+      return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+          <div className="w-full max-w-md">
+            <button onClick={onBack} className="text-slate-400 hover:text-white mb-6 text-sm">← Back</button>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8">
+              <h1 className="text-2xl font-black text-white mb-6">Create Account</h1>
+              <div className="space-y-4">
+                {[["name", "Full Name", "text"], ["email", "Email", "email"], ["password", "Password", "password"]].map(([k, l, t]) => <div key={k}><label className="block text-xs font-bold text-slate-400 uppercase mb-2">{l}</label><input type={t} value={f[k]} onChange={e => setF(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/></div>)}
+                <button onClick={() => onRegister(f)} disabled={!f.name.trim() || !f.email.trim() || !f.password.trim()} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-bold rounded-xl">Register →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function JobBoardAuth({
+      authStripReady,
+      sessionRole,
+      candidateFirstName,
+      onLoginClick,
+      onLogoutClick,
+      onGoToAts,
+    }) {
+      const [menuOpen, setMenuOpen] = useState(false);
+      const wrapRef = useRef(null);
+      useEffect(() => {
+        const close = (e) => {
+          if (wrapRef.current && !wrapRef.current.contains(e.target)) setMenuOpen(false);
+        };
+        const esc = (e) => { if (e.key === "Escape") setMenuOpen(false); };
+        document.addEventListener("mousedown", close);
+        document.addEventListener("keydown", esc);
+        return () => {
+          document.removeEventListener("mousedown", close);
+          document.removeEventListener("keydown", esc);
+        };
+      }, []);
+      if (!authStripReady) return null;
+      const tok = localStorage.getItem(LS_TOKEN);
+      const anon = !tok;
+      const cand = sessionRole === "candidate" && tok;
+      const hr = sessionRole === "hr" && tok;
+      const ats = (typeof window.__ATS_URL__ === "string" && window.__ATS_URL__.trim()) || "";
+      const first = candidateFirstName || "there";
+
+      const goAts = (e) => {
+        e.preventDefault();
+        if (ats) {
+          window.location.href = ats;
+        } else {
+          onGoToAts();
+        }
+        setMenuOpen(false);
+      };
+
+      return (
+        <>
+          <div className="hidden md:flex items-center flex-wrap gap-x-2 gap-y-1 text-sm text-white">
+            {anon ? (
+              <>
+                <span className="text-slate-300 whitespace-nowrap">Already have an account?</span>
+                <button type="button" onClick={onLoginClick} className="px-3 py-1.5 rounded-lg border border-white/40 text-white text-sm font-semibold hover:bg-white/10 transition-colors">Login</button>
+              </>
+            ) : null}
+            {cand ? (
+              <>
+                <span className="text-white font-medium whitespace-nowrap">Hi, {first}</span>
+                <span className="text-slate-600 select-none" aria-hidden>|</span>
+                <button type="button" onClick={onLogoutClick} className="text-slate-200 hover:text-white text-sm font-semibold px-1 py-0.5 rounded border border-transparent hover:border-white/20">Logout</button>
+              </>
+            ) : null}
+            {hr ? (
+              <>
+                <span className="text-slate-300 whitespace-nowrap">Logged in as HR</span>
+                <span className="text-slate-600 select-none" aria-hidden>|</span>
+                {ats ? (
+                  <a href={ats} className="text-indigo-300 hover:text-indigo-200 text-sm font-bold whitespace-nowrap">Go to ATS →</a>
+                ) : (
+                  <button type="button" onClick={goAts} className="text-indigo-300 hover:text-indigo-200 text-sm font-bold whitespace-nowrap">Go to ATS →</button>
+                )}
+              </>
+            ) : null}
+          </div>
+
+          <div className="md:hidden relative" ref={wrapRef}>
+            <button
+              type="button"
+              onClick={() => setMenuOpen((o) => !o)}
+              className="p-2 rounded-lg border border-white/30 text-white hover:bg-white/10"
+              aria-expanded={menuOpen}
+              aria-haspopup="true"
+              aria-label="Account menu"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+            </button>
+            {menuOpen ? (
+              <div className="absolute right-0 top-full mt-1 z-50 min-w-[220px] rounded-xl border border-slate-600 bg-slate-800 shadow-xl py-2">
+                {anon ? (
+                  <div className="px-3 py-2 space-y-2">
+                    <p className="text-xs text-slate-400">Already have an account?</p>
+                    <button type="button" onClick={() => { onLoginClick(); setMenuOpen(false); }} className="w-full text-left px-3 py-2 rounded-lg border border-white/30 text-white text-sm font-semibold hover:bg-white/10">Login</button>
+                  </div>
+                ) : null}
+                {cand ? (
+                  <div className="px-2 py-1 space-y-1">
+                    <p className="px-2 py-1 text-sm text-white font-medium">Hi, {first}</p>
+                    <button type="button" onClick={() => { onLogoutClick(); setMenuOpen(false); }} className="w-full text-left px-3 py-2 rounded-lg text-slate-200 hover:bg-slate-700 text-sm">Logout</button>
+                  </div>
+                ) : null}
+                {hr ? (
+                  <div className="px-2 py-1 space-y-1">
+                    <p className="px-2 py-1 text-xs text-slate-400">Logged in as HR</p>
+                    {ats ? (
+                      <a href={ats} className="block px-3 py-2 rounded-lg text-indigo-300 hover:bg-slate-700 text-sm font-bold" onClick={() => setMenuOpen(false)}>Go to ATS →</a>
+                    ) : (
+                      <button type="button" onClick={(e) => { goAts(e); }} className="w-full text-left px-3 py-2 rounded-lg text-indigo-300 hover:bg-slate-700 text-sm font-bold">Go to ATS →</button>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        </>
+      );
+    }
+
+    function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false }) {
+      const [q, setQ] = useState("");
+      const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
+      const f = jobs.filter(j => j.title.toLowerCase().includes(q.toLowerCase()) || j.location.toLowerCase().includes(q.toLowerCase()));
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-3">
+              {showBack ? <button type="button" onClick={onBack} className="text-slate-400 hover:text-white">←</button> : null}
+              <span className="font-bold">Job Board</span>
+            </div>
+            <div className="flex items-center gap-2 md:gap-3 flex-wrap justify-end">
+              {authStripReady && authCandidate && onTalentPoolPortal ? (
+                <button type="button" onClick={onTalentPoolPortal} className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-sm font-bold bg-violet-100 text-indigo-900 border border-violet-200 hover:bg-violet-50 transition-colors">
+                  <span aria-hidden>☀</span> Talent Pool
+                </button>
+              ) : null}
+              {jobBoardAuth}
+            </div>
+          </div>
+          <div className="max-w-4xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-2">Open Positions</h1>
+            <p className="text-slate-500 mb-5">Indira IVF — India's Leading Fertility Healthcare Chain</p>
+            <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search jobs…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-4 shadow-sm focus:outline-none focus:border-indigo-400"/>
+            {onTalentPool ? (
+              <div className="bg-gradient-to-r from-indigo-50 to-purple-50 border border-indigo-200 rounded-2xl p-5 mb-5 flex items-center justify-between flex-wrap gap-3">
+                <div><p className="font-bold text-indigo-900 mb-0.5">🌟 Don't see a matching role?</p><p className="text-xs text-indigo-600">Submit your CV to our talent pool — we'll reach out when something opens.</p></div>
+                <button type="button" onClick={onTalentPool} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl text-sm shrink-0">Join Talent Pool →</button>
+              </div>
+            ) : null}
+            <div className="space-y-4">{f.map(j => {
+              let coolingDays = null;
+              let showApplied = false;
+              let doApply = false;
+              let showContinue = false;
+              let locked = false;
+              let extraCoolingLine = null;
+              if (j.userStatus === "cooling") {
+                locked = true;
+                coolingDays = j.coolingDaysLeft;
+                const st = getCoolingStatus(applicationHistory, j.id, cm);
+                if (!st.canApply && st.eligibleAt) extraCoolingLine = (<p className="text-xs text-amber-600 mt-2 font-medium">Last completed interview {fmtDate(st.lastCompletedAt || st.lastAppliedAt)}. Re-apply on {fmtDate(st.eligibleAt)} ({cm}-month cooling period).</p>);
+              } else if (j.userStatus === "interview_pending") {
+                showContinue = true;
+              } else if (j.userStatus === "applied") {
+                showApplied = true;
+              } else if (j.userStatus === "open") {
+                doApply = true;
+              } else {
+                const status = getCoolingStatus(applicationHistory, j.id, cm);
+                if (status.pendingInterview) {
+                  showContinue = true;
+                } else if (!status.canApply) {
+                  locked = true;
+                  coolingDays = status.daysRemaining;
+                  extraCoolingLine = (<p className="text-xs text-amber-600 mt-2 font-medium">Last completed interview {fmtDate(status.lastCompletedAt || status.lastAppliedAt)}. Re-apply on {fmtDate(status.eligibleAt)} ({cm}-month cooling period).</p>);
+                } else if (status.hasApplied) {
+                  showApplied = true;
+                } else {
+                  doApply = true;
+                }
+              }
+              const dim = locked || showApplied;
+              return (
+                <div key={j.id} className={`bg-white rounded-2xl border p-6 flex items-start justify-between flex-wrap gap-3 ${dim ? "border-slate-200 opacity-75" : "border-slate-200 hover:shadow-lg hover:border-indigo-200"}`}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <h2 className="text-xl font-bold text-slate-900">{j.title}</h2>
+                      {locked && coolingDays != null ? <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">Cooling: {coolingDays}d left</span> : null}
+                    </div>
+                    <p className="text-slate-500 text-sm">{j.designation} · {j.location}</p>
+                    <p className="text-slate-600 text-sm mt-2 line-clamp-2">{j.description}</p>
+                    {extraCoolingLine}
+                  </div>
+                  {doApply ? <button type="button" onClick={() => onApply(j)} className="shrink-0 px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl text-sm">Apply</button> : null}
+                  {showContinue ? <button type="button" onClick={() => onContinueInterview(j)} className="shrink-0 px-5 py-2 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-sm">Continue interview →</button> : null}
+                  {locked ? <button type="button" disabled className="shrink-0 px-5 py-2 bg-slate-100 text-slate-400 font-bold rounded-xl text-sm">Locked</button> : null}
+                  {showApplied ? <button type="button" disabled className="shrink-0 px-5 py-2 bg-slate-100 text-slate-500 font-bold rounded-xl text-sm">Applied</button> : null}
+                </div>
+              );
+            })}{f.length === 0 ? <p className="text-center text-slate-400 py-12">No matching jobs.</p> : null}</div>
+          </div>
+        </div>
+      );
+    }
+
+    function CVUpload({ jobTitle, onComplete, onBack, maxCvMb }) {
+      const [file, setFile] = useState(null), [processing, setProcessing] = useState(false), [error, setError] = useState(""), [ack, setAck] = useState(false);
+      const ref = useRef();
+      const mb = typeof maxCvMb === "number" ? maxCvMb : 5;
+      const handleFile = async (f) => { if (!f) return; setError(""); setProcessing(true); try { setFile(await processResumeFile(f, mb)); } catch (e) { setError(e.message); setFile(null); } finally { setProcessing(false); } };
+      return (
+        <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+          <div className="w-full max-w-lg">
+            <button onClick={onBack} className="text-slate-500 hover:text-slate-700 mb-6 text-sm">← Back</button>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-lg p-8">
+              <h1 className="text-2xl font-black text-slate-900 mb-1">Upload Resume</h1>
+              <p className="text-slate-500 text-sm mb-4">For: <span className="font-bold text-indigo-600">{jobTitle}</span></p>
+              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4 text-xs"><p className="font-bold text-slate-700 mb-1">📎 Accepted formats</p><p className="text-slate-600">JPG · JPEG · PDF · DOC · DOCX <span className="text-slate-400">(max {mb} MB)</span></p></div>
+              <div onClick={() => ref.current?.click()} className={`border-2 border-dashed rounded-xl p-6 text-center cursor-pointer mb-3 ${error ? "border-red-300 bg-red-50" : file ? "border-green-300 bg-green-50" : "border-slate-200 hover:border-indigo-300 hover:bg-indigo-50"}`}>
+                {processing ? <><div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-2"/><p className="text-slate-500 text-sm">Processing…</p></> :
+                 file ? <><div className="text-3xl mb-1">{fileIcon(file.ext)}</div><p className="text-slate-700 text-sm font-semibold truncate">{file.name}</p><p className="text-slate-500 text-xs mt-1">{file.ext.toUpperCase()} · {fmtSize(file.size)} · ✓ Validated</p><p className="text-indigo-500 text-xs mt-2 underline">Choose different</p></> :
+                 <><svg className="w-10 h-10 text-slate-300 mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/></svg><p className="text-slate-700 text-sm font-semibold">Click to upload</p><p className="text-slate-400 text-xs mt-1">JPG · JPEG · PDF · DOC · DOCX</p></>}
+              </div>
+              <input ref={ref} type="file" accept=".jpg,.jpeg,.pdf,.doc,.docx" onChange={e => handleFile(e.target.files?.[0])} className="hidden"/>
+              {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-sm mb-4 flex gap-2"><span>⚠</span><span>{error}</span></div>}
+              <label className={`flex gap-3 p-3 rounded-xl border mb-4 cursor-pointer ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I acknowledge processing for recruitment per §6 DPDPA.</p></label>
+              <button onClick={() => onComplete(file)} disabled={!file || !ack || processing} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">Submit →</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function TalentPoolSubmit({ candidate, onSubmit, onBack, maxCvMb }) {
+      const [form, setForm] = useState({ name: candidate?.name || "", email: candidate?.email || "", phone: "", desiredRoles: "", skills: "", experience: "", location: "", keywords: "" });
+      const [file, setFile] = useState(null), [error, setError] = useState(""), [processing, setProcessing] = useState(false), [ack, setAck] = useState(false), [done, setDone] = useState(false);
+      const ref = useRef();
+      const mb = typeof maxCvMb === "number" ? maxCvMb : 5;
+      const handleFile = async (f) => { if (!f) return; setError(""); setProcessing(true); try { setFile(await processResumeFile(f, mb)); } catch (e) { setError(e.message); setFile(null); } finally { setProcessing(false); } };
+      const submit = () => {
+        if (!form.name.trim() || !form.email.trim() || !file || !ack) return;
+        onSubmit({
+          id: "TP-" + Date.now(), candidateId: candidate?.id || null,
+          name: form.name.trim(), email: form.email.trim().toLowerCase(), phone: form.phone.trim(),
+          desiredRoles: form.desiredRoles.split(",").map(s => s.trim()).filter(Boolean),
+          skills: form.skills.split(",").map(s => s.trim()).filter(Boolean),
+          experience: parseInt(form.experience) || 0, location: form.location.trim(), keywords: form.keywords.trim(),
+          cvText: file.cvText, cvFile: file, submittedAt: new Date().toISOString(), mappedToJobs: []
+        });
+        setDone(true);
+      };
+      if (done) return (
+        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-8 text-center">
+          <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-6 text-3xl">✓</div>
+          <h1 className="text-3xl font-black text-slate-900 mb-2">Added to Talent Pool</h1>
+          <p className="text-slate-500 mb-5 max-w-md">HR SPOCs will reach out when a matching role opens.</p>
+          <button onClick={onBack} className="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold">Done</button>
+        </div>
+      );
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">←</button><span className="font-bold">Join Talent Pool</span><Badge/></div>
+          <div className="max-w-2xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-1">Submit to Talent Pool</h1>
+            <p className="text-slate-500 mb-5">No active role matches? Share your profile.</p>
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-5 text-xs text-indigo-700"><p className="font-bold mb-1">📋 About the Talent Pool</p><p>Your CV is stored independently. HR SPOCs will contact you. All access is logged (§5, §6, §8 DPDPA).</p></div>
+            <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
+              {[["Full Name *", "name", "text"], ["Email *", "email", "email"], ["Phone", "phone", "tel"], ["Location", "location", "text"]].map(([l, k, t]) => <div key={k}><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{l}</label><input type={t} value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"/></div>)}
+              <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Years of Experience</label><input type="number" min="0" value={form.experience} onChange={e => setForm(p => ({ ...p, experience: e.target.value }))} placeholder="0" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Desired Roles <span className="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input value={form.desiredRoles} onChange={e => setForm(p => ({ ...p, desiredRoles: e.target.value }))} placeholder="e.g. Senior Embryologist" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Skills <span className="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input value={form.skills} onChange={e => setForm(p => ({ ...p, skills: e.target.value }))} placeholder="ICSI, Vitrification" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notes / Keywords</label><textarea rows={3} value={form.keywords} onChange={e => setForm(p => ({ ...p, keywords: e.target.value }))} placeholder="Anything else…" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm resize-none"/></div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-2">Upload Resume *</label>
+                <div onClick={() => ref.current?.click()} className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer ${error ? "border-red-300 bg-red-50" : file ? "border-green-300 bg-green-50" : "border-slate-200 hover:border-indigo-300 hover:bg-indigo-50"}`}>
+                  {processing ? <><div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin mx-auto mb-2"/><p className="text-slate-500 text-sm">Processing…</p></> :
+                   file ? <><div className="text-2xl mb-1">{fileIcon(file.ext)}</div><p className="text-slate-700 text-sm font-semibold">{file.name}</p><p className="text-slate-500 text-xs">{file.ext.toUpperCase()} · {fmtSize(file.size)}</p></> :
+                   <><p className="text-slate-700 text-sm font-semibold">Click to upload</p><p className="text-slate-500 text-xs mt-1">JPG · JPEG · PDF · DOC · DOCX (max {mb} MB)</p></>}
+                </div>
+                <input ref={ref} type="file" accept=".jpg,.jpeg,.pdf,.doc,.docx" onChange={e => handleFile(e.target.files?.[0])} className="hidden"/>
+                {error && <p className="text-red-600 text-xs mt-2">⚠ {error}</p>}
+              </div>
+              <label className={`flex gap-3 p-3 rounded-xl border cursor-pointer ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I consent to my profile being stored in the talent pool (§6 DPDPA).</p></label>
+              <button onClick={submit} disabled={!form.name.trim() || !form.email.trim() || !file || !ack} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">Submit →</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    const PDFJS_WORKER_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js";
+
+    function getPdfjsLib() {
+      return typeof window !== "undefined" && window.pdfjsLib ? window.pdfjsLib : null;
+    }
+
+    function TalentPoolPdfPage({ pdf, pageNum }) {
+      const canvasRef = useRef(null);
+      useEffect(() => {
+        if (!pdf || !canvasRef.current) return;
+        let cancelled = false;
+        pdf.getPage(pageNum).then((page) => {
+          if (cancelled) return;
+          const canvas = canvasRef.current;
+          const ctx = canvas.getContext("2d");
+          const scale = 1.35;
+          const viewport = page.getViewport({ scale });
+          canvas.width = viewport.width;
+          canvas.height = viewport.height;
+          page.render({ canvasContext: ctx, viewport }).promise.catch(() => {});
+        }).catch(() => {});
+        return () => { cancelled = true; };
+      }, [pdf, pageNum]);
+      return <canvas ref={canvasRef} className="mb-3 shadow-md bg-white mx-auto max-w-full block rounded border border-slate-200" />;
+    }
+
+    function TalentPoolPdfViewer({ blobUrl, dataUrl }) {
+      const [pdf, setPdf] = useState(null);
+      const [nPages, setNPages] = useState(0);
+      const [useIframe, setUseIframe] = useState(false);
+      const url = blobUrl || dataUrl;
+      useEffect(() => {
+        if (!url) return;
+        const lib = getPdfjsLib();
+        if (!lib || typeof lib.getDocument !== "function") {
+          setUseIframe(true);
+          return;
+        }
+        lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+        let cancelled = false;
+        lib.getDocument({ url }).promise.then((p) => {
+          if (cancelled) return;
+          setPdf(p);
+          setNPages(p.numPages);
+        }).catch(() => {
+          if (!cancelled) setUseIframe(true);
+        });
+        return () => { cancelled = true; };
+      }, [url]);
+      if (useIframe && url) {
+        return <iframe title="Resume PDF" src={url} className="w-full min-h-[75vh] rounded-lg border-0 bg-white" />;
+      }
+      if (!pdf) {
+        return (
+          <div className="flex justify-center py-16">
+            <div className="w-10 h-10 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+          </div>
+        );
+      }
+      return (
+        <div className="overflow-y-auto max-h-[75vh] space-y-2 py-2">
+          {Array.from({ length: nPages }, (_, i) => (
+            <TalentPoolPdfPage key={i + 1} pdf={pdf} pageNum={i + 1} />
+          ))}
+        </div>
+      );
+    }
+
+    function ResumePreviewModal({ onClose, dataUrl, fileName, ext, cvText }) {
+      const [blobUrl, setBlobUrl] = useState(null);
+      useEffect(() => {
+        const u = dataUrlToBlobUrl(dataUrl);
+        setBlobUrl(u);
+        return () => { if (u) URL.revokeObjectURL(u); };
+      }, [dataUrl]);
+      const ex = (ext || "").toLowerCase();
+      const isPdf = ex === "pdf" || (dataUrl && dataUrl.indexOf("data:application/pdf") === 0);
+      const isImage = ["jpg", "jpeg", "png", "gif", "webp"].includes(ex);
+      const src = blobUrl || dataUrl;
+      return (
+        <div className="fixed inset-0 bg-black/70 z-[100] flex items-center justify-center p-4" onClick={onClose}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 shrink-0">
+              <h2 className="font-bold text-slate-800 truncate pr-6">{fileName || "Resume"}</h2>
+              <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-700 w-10 h-10 rounded-full hover:bg-slate-100 flex items-center justify-center">✕</button>
+            </div>
+            <div className="flex-1 overflow-auto bg-slate-100 p-3 min-h-[45vh]">
+              {isPdf && src ? (
+                <TalentPoolPdfViewer blobUrl={blobUrl} dataUrl={dataUrl} />
+              ) : isImage && src ? (
+                <div className="flex justify-center">
+                  <img src={src} alt="" className="max-w-full max-h-[82vh] object-contain rounded-lg shadow bg-white" />
+                </div>
+              ) : (
+                <div className="p-4">
+                  <p className="text-sm text-slate-600 mb-3">In-app preview works best for PDF and images. For Word documents, use the extracted text below or Download.</p>
+                  {cvText ? (
+                    <pre className="whitespace-pre-wrap font-sans text-xs bg-white p-4 rounded-xl border border-slate-200 max-h-[72vh] overflow-auto text-slate-800">{cvText}</pre>
+                  ) : (
+                    <p className="text-sm text-slate-500">No preview available. Use Download.</p>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function TalentPoolBrowse({ talentPool, jobs, candidates, onMapToJob, onLogAudit, onBack, coolingMonths }) {
+      const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
+      const [filters, setFilters] = useState({ role: "", skill: "", minExp: "", maxExp: "", location: "", keyword: "", fromDate: "", toDate: "" });
+      const [selected, setSelected] = useState(null), [mapJobId, setMapJobId] = useState(""), [mapping, setMapping] = useState(false);
+      const [resumePreview, setResumePreview] = useState(null);
+      const filtered = talentPool.filter(t => {
+        if (filters.role && !(t.desiredRoles || []).join(" ").toLowerCase().includes(filters.role.toLowerCase())) return false;
+        if (filters.skill && !(t.skills || []).join(" ").toLowerCase().includes(filters.skill.toLowerCase())) return false;
+        if (filters.minExp !== "" && (t.experience || 0) < parseInt(filters.minExp)) return false;
+        if (filters.maxExp !== "" && (t.experience || 0) > parseInt(filters.maxExp)) return false;
+        if (filters.location && !(t.location || "").toLowerCase().includes(filters.location.toLowerCase())) return false;
+        if (filters.keyword) { const all = `${t.name} ${t.email} ${t.keywords} ${t.cvText} ${(t.skills || []).join(" ")} ${(t.desiredRoles || []).join(" ")}`.toLowerCase(); if (!all.includes(filters.keyword.toLowerCase())) return false; }
+        if (filters.fromDate && new Date(t.submittedAt) < new Date(filters.fromDate)) return false;
+        if (filters.toDate && new Date(t.submittedAt) > new Date(filters.toDate + "T23:59:59")) return false;
+        return true;
+      });
+      const hasFilters = Object.values(filters).some(v => v !== "");
+      const view = (e) => { setSelected(e); onLogAudit("VIEW_TP_PROFILE", e.id, `Viewed ${e.name}`); };
+      const download = (e) => { downloadDataUrl(e.cvFile.dataUrl, e.cvFile.name); onLogAudit("DOWNLOAD_TP_CV", e.id, `Downloaded ${e.name}'s CV`); };
+      const viewResume = (e) => {
+        if (!e.cvFile?.dataUrl) return;
+        setResumePreview({
+          dataUrl: e.cvFile.dataUrl,
+          fileName: e.cvFile.name,
+          ext: e.cvFile.ext,
+          cvText: e.cvText || "",
+        });
+        onLogAudit("VIEW_TP_CV", e.id, `In-app preview ${e.name}'s CV`);
+      };
+      const handleMap = () => {
+        if (!mapJobId || !selected) return;
+        const job = jobs.find(j => j.id === mapJobId);
+        const existing = candidates.find(c => c.email.toLowerCase() === selected.email.toLowerCase());
+        if (existing) {
+          const status = getCoolingStatus(existing.applicationHistory, mapJobId, cm);
+          if (status.pendingInterview) { alert(`Cannot map: ${existing.name} already has an active application (interview not completed).`); return; }
+          if (!status.canApply) { alert(`Cannot map: ${existing.name} is in cooling period (${status.daysRemaining}d remaining).`); return; }
+        }
+        onMapToJob(selected, mapJobId);
+        onLogAudit("MAP_TO_JOB", selected.id, `Mapped ${selected.name} → ${job?.title}`);
+        alert(`✓ ${selected.name} mapped to "${job?.title}".`);
+        setMapping(false); setMapJobId(""); setSelected(null);
+      };
+      return (
+        <>
+          {resumePreview ? (
+            <ResumePreviewModal
+              dataUrl={resumePreview.dataUrl}
+              fileName={resumePreview.fileName}
+              ext={resumePreview.ext}
+              cvText={resumePreview.cvText}
+              onClose={() => setResumePreview(null)}
+            />
+          ) : null}
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3 flex-wrap"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Talent Pool</span><span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{talentPool.length} profiles</span><span className="text-xs text-slate-400 ml-auto">All access logged (§8)</span></div>
+          {selected && (
+            <Modal title={selected.name} onClose={() => { setSelected(null); setMapping(false); setMapJobId(""); setResumePreview(null); }} wide>
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  {selected.phone && <div><p className="text-xs text-slate-400 font-bold">Phone</p><p>{selected.phone}</p></div>}
+                  <div><p className="text-xs text-slate-400 font-bold">Email</p><p>{selected.email}</p></div>
+                  {selected.location && <div><p className="text-xs text-slate-400 font-bold">Location</p><p>{selected.location}</p></div>}
+                  <div><p className="text-xs text-slate-400 font-bold">Experience</p><p>{selected.experience} yrs</p></div>
+                  <div><p className="text-xs text-slate-400 font-bold">Submitted</p><p>{fmtDate(selected.submittedAt)}</p></div>
+                </div>
+                {selected.desiredRoles?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Desired Roles</p><div className="flex gap-1 flex-wrap">{selected.desiredRoles.map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg">{r}</span>)}</div></div>}
+                {selected.skills?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Skills</p><div className="flex gap-1 flex-wrap">{selected.skills.map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-lg">{s}</span>)}</div></div>}
+                {selected.keywords && <div><p className="text-xs text-slate-400 font-bold mb-1">Notes</p><p className="text-sm text-slate-700">{selected.keywords}</p></div>}
+                <div>
+                  <p className="text-xs text-slate-400 font-bold mb-1">Resume</p>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-sm min-w-0"><span className="text-2xl shrink-0">{fileIcon(selected.cvFile.ext)}</span><div className="min-w-0"><p className="font-bold text-slate-800 truncate max-w-xs">{selected.cvFile.name}</p><p className="text-xs text-slate-500">{selected.cvFile.ext.toUpperCase()} · {fmtSize(selected.cvFile.size)}</p></div></div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button type="button" onClick={() => viewResume(selected)} className="px-4 py-2 bg-white border border-indigo-300 text-indigo-700 hover:bg-indigo-50 text-xs font-bold rounded-lg">View</button>
+                      <button type="button" onClick={() => download(selected)} className="px-4 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg">⬇ Download</button>
+                    </div>
+                  </div>
+                </div>
+                <div className="border-t border-slate-100 pt-4">
+                  {!mapping ? <button onClick={() => setMapping(true)} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">→ Map to Job</button> : (
+                    <div className="space-y-3">
+                      <select value={mapJobId} onChange={e => setMapJobId(e.target.value)} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"><option value="">— Choose role —</option>{jobs.map(j => <option key={j.id} value={j.id}>{j.title} · {j.location}</option>)}</select>
+                      <div className="flex gap-2"><button onClick={() => { setMapping(false); setMapJobId(""); }} className="flex-1 py-2.5 border border-slate-200 text-slate-600 font-bold rounded-xl">Cancel</button><button onClick={handleMap} disabled={!mapJobId} className="flex-1 py-2.5 bg-indigo-600 text-white font-bold rounded-xl disabled:bg-slate-200">Confirm</button></div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Modal>
+          )}
+          <div className="max-w-6xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-1">Talent Pool</h1>
+            <p className="text-slate-500 mb-6">Search, view, download, and map talent pool CVs.</p>
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 mb-6">
+              <h2 className="text-xs font-black text-slate-400 uppercase mb-3">🔍 Filters</h2>
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                {[["Role", "role", "text", "Embryologist"], ["Skill", "skill", "text", "ICSI"], ["Location", "location", "text", "Mumbai"], ["Keyword", "keyword", "text", "Free text"], ["Min Exp", "minExp", "number", ""], ["Max Exp", "maxExp", "number", ""], ["From Date", "fromDate", "date", ""], ["To Date", "toDate", "date", ""]].map(([l, k, t, p]) => <div key={k}><label className="block text-xs text-slate-500 mb-1">{l}</label><input type={t} value={filters[k]} onChange={e => setFilters(prev => ({ ...prev, [k]: e.target.value }))} placeholder={p} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-400"/></div>)}
+              </div>
+              {hasFilters && <button onClick={() => setFilters({ role: "", skill: "", minExp: "", maxExp: "", location: "", keyword: "", fromDate: "", toDate: "" })} className="mt-3 text-xs text-indigo-500 font-bold">Clear all ✕</button>}
+            </div>
+            <p className="text-sm font-bold text-slate-600 mb-3">{filtered.length} {filtered.length === 1 ? "profile" : "profiles"}</p>
+            {filtered.length === 0 ? <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 py-16 text-center"><p className="text-slate-400">{talentPool.length === 0 ? "Talent pool is empty." : "No profiles match."}</p></div> : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{filtered.map(t => (
+                <div key={t.id} className="bg-white rounded-2xl border border-slate-200 p-5 hover:shadow-lg hover:border-indigo-200 transition-all">
+                  <div className="flex items-start justify-between mb-3"><div className="flex items-center gap-3"><div className="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-black text-lg">{t.name[0]}</div><div><p className="font-bold text-slate-900">{t.name}</p><p className="text-xs text-slate-400">{t.email}</p></div></div><span className="text-xs font-bold text-slate-500 bg-slate-50 px-2 py-1 rounded-lg">{fmtDate(t.submittedAt)}</span></div>
+                  <div className="flex gap-3 text-xs text-slate-600 mb-3 flex-wrap">{t.location && <p>📍 {t.location}</p>}<p>💼 {t.experience} yrs</p><p>{fileIcon(t.cvFile.ext)} {t.cvFile.ext.toUpperCase()}</p></div>
+                  {t.desiredRoles?.length > 0 && <div className="flex gap-1 flex-wrap mb-2">{t.desiredRoles.slice(0, 3).map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-lg">{r}</span>)}</div>}
+                  {t.skills?.length > 0 && <div className="flex gap-1 flex-wrap mb-3">{t.skills.slice(0, 4).map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded-lg">{s}</span>)}</div>}
+                  <div className="flex gap-2 pt-3 border-t border-slate-100">
+                    <button onClick={() => view(t)} className="flex-1 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg">View</button>
+                    <button onClick={() => download(t)} className="px-3 py-2 border border-slate-200 text-slate-600 text-xs font-bold rounded-lg">⬇</button>
+                  </div>
+                </div>
+              ))}</div>
+            )}
+          </div>
+        </div>
+        </>
+      );
+    }
+
+    function AuditLogView({ auditLog, onBack }) {
+      const [filter, setFilter] = useState("");
+      const filtered = filter ? auditLog.filter(a => `${a.action} ${a.actor} ${a.details}`.toLowerCase().includes(filter.toLowerCase())) : auditLog;
+      const sorted = [...filtered].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+      const color = (a) => a.startsWith("VIEW") ? "bg-blue-50 text-blue-700" : a.startsWith("DOWNLOAD") ? "bg-purple-50 text-purple-700" : a.startsWith("MAP") ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-700";
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Audit Log</span><span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{auditLog.length}</span></div>
+          <div className="max-w-4xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-1">Access & Action Audit</h1>
+            <p className="text-slate-500 mb-5">All HR access logged per §8 DPDPA.</p>
+            <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-5 shadow-sm"/>
+            {sorted.length === 0 ? <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 py-16 text-center"><p className="text-slate-400">No entries.</p></div> : (
+              <div className="space-y-2">{sorted.map(a => (
+                <div key={a.id} className="bg-white border border-slate-200 rounded-xl p-4 flex items-start justify-between gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap"><span className={`text-xs font-black px-2 py-0.5 rounded ${color(a.action)}`}>{a.action}</span><span className="text-xs font-bold text-slate-500">{a.actor}</span></div>
+                    <p className="text-sm text-slate-700">{a.details}</p>
+                  </div>
+                  <div className="text-right shrink-0"><p className="text-xs text-slate-500">{new Date(a.timestamp).toLocaleDateString("en-IN")}</p><p className="text-xs text-slate-400">{new Date(a.timestamp).toLocaleTimeString("en-IN")}</p></div>
+                </div>
+              ))}</div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    const CV_ANALYSER_MAX = 20;
+    const CV_ANALYSER_MB = 5;
+
+    function verdictLabel(v) {
+      const m = { senior: "Senior", mid: "Mid", junior: "Junior", fresher: "Fresher" };
+      return m[v] || (v ? String(v) : "—");
+    }
+
+    function CVResultCard({ row }) {
+      const [open, setOpen] = useState(false);
+      if (row.loading) {
+        return (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-8 flex items-center justify-center gap-3">
+            <div className="w-8 h-8 border-2 border-slate-200 border-t-indigo-600 rounded-full animate-spin shrink-0" aria-hidden />
+            <span className="text-slate-600 text-sm font-medium truncate">{row.filename}</span>
+          </div>
+        );
+      }
+      if (row.status === "error") {
+        return (
+          <div className="bg-white rounded-2xl border border-red-200 shadow-sm px-5 py-4 text-sm text-red-800">
+            <span className="font-semibold">{row.filename}</span>
+            <span className="text-red-700"> — {row.error || "Could not analyse this file."}</span>
+          </div>
+        );
+      }
+      const a = row.analysis || {};
+      const initial = (a.candidateName && String(a.candidateName).trim()[0]) || "?";
+      return (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-12 h-12 rounded-full bg-slate-800 text-white flex items-center justify-center text-lg font-black shrink-0">{initial}</div>
+              <div className="min-w-0">
+                <p className="font-bold text-slate-900 truncate">{a.candidateName || "—"}</p>
+                <p className="text-sm text-slate-500 truncate">{a.email || "—"}</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {row.analysisMode === "pdf_vision" ? <span className="text-xs font-bold text-indigo-800 bg-indigo-100 px-2 py-1 rounded-full">Visual PDF</span> : null}
+              {row.cached ? <span className="text-xs font-bold text-slate-500 bg-slate-100 px-2 py-1 rounded-full">Cached</span> : null}
+              <span className="text-xs font-bold text-white bg-slate-700 px-3 py-1 rounded-full">{verdictLabel(a.verdict)}</span>
+            </div>
+          </div>
+          <p className="text-sm text-slate-600 mb-3">
+            {[a.currentRole, a.yearsExperience != null ? `${a.yearsExperience} yrs` : null, a.phone].filter(Boolean).join(" · ") || "—"}
+          </p>
+          <p className="text-sm text-slate-800 leading-snug line-clamp-2 mb-4">{a.summary || ""}</p>
+          <div className="grid md:grid-cols-2 gap-4 mb-4">
+            <div className="border-l-2 border-green-500 pl-3">
+              <p className="text-xs font-black text-slate-500 uppercase mb-2">Strengths</p>
+              <ul className="text-sm text-slate-700 space-y-1 list-disc list-inside">{(a.strengths || []).map((s, i) => <li key={i}>{s}</li>)}</ul>
+            </div>
+            <div className="border-l-2 border-amber-500 pl-3">
+              <p className="text-xs font-black text-slate-500 uppercase mb-2">Gaps</p>
+              <ul className="text-sm text-slate-700 space-y-1 list-disc list-inside">{(a.gaps || []).map((s, i) => <li key={i}>{s}</li>)}</ul>
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-1.5 mb-3">
+            {(a.skills || []).slice(0, 8).map((sk) => (
+              <span key={sk} className="text-xs font-medium bg-slate-100 text-slate-700 px-2 py-1 rounded-full">{sk}</span>
+            ))}
+          </div>
+          <button type="button" onClick={() => setOpen((o) => !o)} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">
+            {open ? "Hide details" : "Show details"}
+          </button>
+          {open ? (
+            <div className="mt-3 pt-3 border-t border-slate-100 text-sm text-slate-700 space-y-2">
+              <div>
+                <p className="text-xs font-black text-slate-400 uppercase mb-1">Education</p>
+                <ul className="list-disc list-inside space-y-0.5">{(a.education || []).map((e, i) => <li key={i}>{e}</li>)}</ul>
+              </div>
+              {(a.redFlags || []).length > 0 ? (
+                <div>
+                  <p className="text-xs font-black text-slate-400 uppercase mb-1">Red flags</p>
+                  <ul className="list-disc list-inside text-amber-900 space-y-0.5">{a.redFlags.map((e, i) => <li key={i}>{e}</li>)}</ul>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+
+    function CVAnalyserPage({ onBack, onSynced }) {
+      const inputRef = useRef(null);
+      const [staged, setStaged] = useState([]);
+      const [results, setResults] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [banner, setBanner] = useState("");
+
+      const validateAndAddFiles = (fileList) => {
+        const arr = Array.from(fileList || []);
+        if (arr.length === 0) return;
+        setBanner("");
+        const maxBytes = CV_ANALYSER_MB * 1024 * 1024;
+        const next = [...staged];
+        for (const f of arr) {
+          if (next.length >= CV_ANALYSER_MAX) {
+            setBanner(`Maximum ${CV_ANALYSER_MAX} files.`);
+            break;
+          }
+          const ext = (f.name.split(".").pop() || "").toLowerCase();
+          if (ext !== "pdf" && ext !== "docx") {
+            setBanner("Only PDF or DOCX files are allowed.");
+            continue;
+          }
+          if (f.size > maxBytes) {
+            setBanner(`Each file must be ≤ ${CV_ANALYSER_MB} MB.`);
+            continue;
+          }
+          next.push({ id: "f-" + Math.random().toString(36).slice(2) + Date.now(), file: f });
+        }
+        setStaged(next);
+      };
+
+      const onDrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        validateAndAddFiles(e.dataTransfer.files);
+      };
+
+      const runAnalyse = async () => {
+        if (staged.length === 0) return;
+        setBanner("");
+        setBusy(true);
+        const placeholders = staged.map((s) => ({ loading: true, filename: s.file.name, fileId: null }));
+        setResults(placeholders);
+        const fd = new FormData();
+        staged.forEach((s) => fd.append("files", s.file, s.file.name));
+        try {
+          const res = await fetch("/api/admin/cv-analyser/batch", {
+            method: "POST",
+            headers: { ...authHeaders() },
+            body: fd,
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 503 && (data.code === "AI_UNAVAILABLE" || /unavailable/i.test(data.error || ""))) {
+            setBanner("AI service unavailable. Check ANTHROPIC_API_KEY on the server.");
+            setResults([]);
+            return;
+          }
+          if (res.status === 429) {
+            setBanner(data.error || "Too many requests. Try again in a minute.");
+            setResults([]);
+            return;
+          }
+          if (!res.ok) {
+            setBanner(data.error || "Batch request failed.");
+            setResults([]);
+            return;
+          }
+          setResults(data.results || []);
+          if ((data.meta && data.meta.succeeded > 0) && typeof onSynced === "function") {
+            try { await onSynced(); } catch (_) { /* ignore */ }
+          }
+        } catch {
+          setBanner("Could not reach server.");
+          setResults([]);
+        } finally {
+          setBusy(false);
+        }
+      };
+
+      const exportCsv = async () => {
+        const ids = (results || []).filter((r) => r.status === "ok" && r.fileId).map((r) => r.fileId);
+        if (ids.length === 0) return;
+        try {
+          const res = await fetch("/api/admin/cv-analyser/export?fileIds=" + encodeURIComponent(ids.join(",")), { headers: { ...authHeaders() } });
+          if (!res.ok) {
+            const t = await res.json().catch(() => ({}));
+            alert(t.error || "Export failed");
+            return;
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = "cv-analyser-export.csv";
+          a.click();
+          URL.revokeObjectURL(url);
+        } catch {
+          alert("Export failed");
+        }
+      };
+
+      const okCount = (results || []).filter((r) => r.status === "ok").length;
+
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3 flex-wrap">
+            <button type="button" onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button>
+            <span className="font-bold">CV Analyser</span>
+          </div>
+          <div className="max-w-4xl mx-auto px-6 py-8">
+            <h1 className="text-3xl font-black text-slate-900 mb-1">CV Analyser</h1>
+            <p className="text-slate-500 mb-6">Upload up to 20 CVs at once. Get structured AI summaries in seconds.</p>
+            {banner ? <div className="mb-4 text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">{banner}</div> : null}
+            <div
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); inputRef.current && inputRef.current.click(); } }}
+              onDragOver={(e) => { e.preventDefault(); e.stopPropagation(); }}
+              onDrop={onDrop}
+              onClick={() => !busy && inputRef.current && inputRef.current.click()}
+              className={`border-2 border-dashed border-slate-300 rounded-2xl bg-white p-10 text-center cursor-pointer transition hover:border-indigo-400 hover:bg-slate-50/80 ${busy ? "opacity-60 pointer-events-none" : ""}`}
+            >
+              <input ref={inputRef} type="file" multiple accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" className="hidden" onChange={(e) => { validateAndAddFiles(e.target.files); e.target.value = ""; }} />
+              <div className="flex justify-center mb-3 text-slate-400">
+                <svg className="w-14 h-14" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" /></svg>
+              </div>
+              <p className="text-slate-800 font-semibold mb-1">Drag &amp; drop CVs here, or click to browse</p>
+              <p className="text-sm text-slate-500">PDF or DOCX · Up to 20 files · Max {CV_ANALYSER_MB}MB each</p>
+            </div>
+            {staged.length > 0 ? (
+              <div className="mt-4 flex flex-wrap gap-2">
+                {staged.map((s) => (
+                  <span key={s.id} className="inline-flex items-center gap-2 text-sm bg-white border border-slate-200 rounded-full px-3 py-1.5 text-slate-700">
+                    <span className="truncate max-w-[200px]">{s.file.name}</span>
+                    <span className="text-slate-400">· {fmtSize(s.file.size)}</span>
+                    <button type="button" disabled={busy} onClick={(e) => { e.stopPropagation(); setStaged((p) => p.filter((x) => x.id !== s.id)); }} className="text-slate-500 hover:text-red-600 font-bold" aria-label="Remove">✕</button>
+                  </span>
+                ))}
+              </div>
+            ) : null}
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+              <button type="button" disabled={busy} onClick={() => { setStaged([]); setBanner(""); }} className="text-sm font-bold text-slate-600 hover:text-slate-900">Clear All</button>
+              <button type="button" disabled={busy || staged.length === 0} onClick={runAnalyse} className="px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold rounded-xl text-sm transition-colors">
+                {busy ? "Analysing…" : `Analyse ${staged.length} CV${staged.length === 1 ? "" : "s"} →`}
+              </button>
+            </div>
+            {results.length > 0 ? (
+              <div className="mt-10 space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-white border border-slate-200 rounded-xl px-4 py-3">
+                  <p className="text-sm font-bold text-slate-800">{results.length} CV{results.length === 1 ? "" : "s"} analysed{okCount < results.length ? ` · ${okCount} succeeded` : ""}</p>
+                  <div className="flex gap-2">
+                    <button type="button" onClick={exportCsv} disabled={okCount === 0} className="px-4 py-2 text-sm font-bold border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-40">Export CSV</button>
+                    <button type="button" onClick={() => { setResults([]); setBanner(""); }} className="px-4 py-2 text-sm font-bold text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50">Clear Results</button>
+                  </div>
+                </div>
+                <div className="space-y-4">
+                  {results.map((row, i) => <CVResultCard key={row.fileId || row.filename + "-" + i} row={row} />)}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+
+    function Screening({ candidates, jobs, onShortlist, onBack }) {
+      const [phase, setPhase] = useState("chat"), [criteria, setCriteria] = useState(""), [scored, setScored] = useState([]), [sel, setSel] = useState(new Set()), [input, setInput] = useState(""), [msgs, setMsgs] = useState([]), [busy, setBusy] = useState(false), [hist, setHist] = useState([]);
+      const consented = candidates.filter(c => c.consent);
+      useEffect(() => { (async () => { setBusy(true); const r = await callClaude([{ role: "user", content: `${consented.length} candidates to screen.` }], "You are Swar HR. Be concise."); setMsgs([{ role: "ai", text: r }]); setHist([{ role: "user", content: "Hi." }, { role: "assistant", content: r }]); setBusy(false); })(); }, []);
+      const send = async () => { if (!input.trim() || busy) return; const u = input.trim(); setInput(""); const h = [...hist, { role: "user", content: u }]; setMsgs(p => [...p, { role: "user", text: u }]); setBusy(true); const r = await callClaude(h, "Be concise."); setMsgs(p => [...p, { role: "ai", text: r }]); setHist([...h, { role: "assistant", content: r }]); setCriteria(p => p + " " + u); setBusy(false); };
+      const analyze = async () => { setPhase("analyzing"); const results = []; for (const c of consented.filter(c => c.jobId && c.cv)) { const job = jobs.find(j => j.id === c.jobId) || {}; const r = await callClaude([{ role: "user", content: `Score CV for "${job.title}". Req: ${job.requirements}. Extra: ${criteria}. CV: ${c.cv}. JSON: {"overallScore":0-100,"summary":"...","recommendation":"shortlist|reject"}` }], "Return only JSON.", true); results.push({ ...c, sr: r || { overallScore: 50, summary: "—", recommendation: "shortlist" } }); } const s = results.sort((a, b) => (b.sr?.overallScore || 0) - (a.sr?.overallScore || 0)); setScored(s); setSel(new Set(s.filter(c => c.sr?.recommendation === "shortlist").map(c => c.id))); setPhase("results"); };
+      if (phase === "analyzing") return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><Spin label="Analysing…"/></div>;
+      if (phase === "results") return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between"><span className="font-bold">Results</span><button onClick={() => onShortlist(candidates.map(c => sel.has(c.id) ? { ...c, status: "SHORTLISTED" } : c))} className="px-5 py-1.5 bg-indigo-600 rounded-lg text-sm font-bold">Confirm ({sel.size})</button></div>
+          <div className="max-w-3xl mx-auto px-6 py-8 space-y-3">{scored.map(c => { const on = sel.has(c.id); return <div key={c.id} onClick={() => setSel(p => { const n = new Set(p); n.has(c.id) ? n.delete(c.id) : n.add(c.id); return n; })} className={`bg-white rounded-2xl border p-4 cursor-pointer ${on ? "border-indigo-300" : "border-slate-200 opacity-60"}`}><div className="flex items-center justify-between"><div><p className="font-bold">{c.name}</p><p className="text-xs text-slate-400">{c.email}</p></div><p className="text-2xl font-black text-indigo-600">{c.sr?.overallScore}</p></div><p className="text-sm text-slate-600 mt-2">{c.sr?.summary}</p></div>; })}</div>
+        </div>
+      );
+      return (
+        <div className="min-h-screen bg-slate-50 flex flex-col">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between"><div className="flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Screening</span></div><button onClick={analyze} disabled={consented.filter(c => c.cv && c.jobId).length === 0} className="px-4 py-1.5 bg-indigo-600 disabled:bg-slate-700 rounded-lg text-sm font-bold">Analyse →</button></div>
+          <div className="flex-1 max-w-3xl mx-auto w-full px-6 py-6 flex flex-col">
+            <div className="flex-1 bg-white rounded-2xl border border-slate-200 flex flex-col overflow-hidden">
+              <div className="flex-1 overflow-y-auto p-4 space-y-3">{msgs.map((m, i) => <div key={i} className={`flex ${m.role === "ai" ? "justify-start" : "justify-end"}`}><div className={`max-w-xs px-4 py-3 rounded-2xl text-sm ${m.role === "ai" ? "bg-slate-100" : "bg-indigo-600 text-white"}`}>{m.text}</div></div>)}{busy && <p className="text-slate-500 text-sm animate-pulse">Typing…</p>}</div>
+              <div className="border-t border-slate-100 p-4 flex gap-3"><input value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => e.key === "Enter" && send()} placeholder="Criteria…" className="flex-1 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm"/><button onClick={send} disabled={!input.trim() || busy} className="px-4 py-2 bg-indigo-600 text-white font-bold rounded-xl disabled:bg-slate-200 text-sm">Send</button></div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function InterviewScheduleModal({ jobTitle, onConfirm, onCancel }) {
+      const [local, setLocal] = useState("");
+      useEffect(() => {
+        const d = new Date();
+        d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+        setLocal(d.toISOString().slice(0, 16));
+      }, []);
+      return (
+        <Modal title={jobTitle ? `Schedule · ${jobTitle}` : "Schedule interview"} onClose={onCancel}>
+          <p className="text-xs text-slate-500 mb-3">Date and time use your device timezone. The Start button unlocks at this time (HR can always start from the dashboard).</p>
+          <input type="datetime-local" value={local} onChange={e => setLocal(e.target.value)} className="w-full border border-slate-200 rounded-xl px-3 py-2.5 mb-4 text-slate-800" />
+          <button type="button" onClick={() => { if (!local) return; onConfirm(new Date(local).toISOString()); }} className="w-full py-3 bg-teal-700 hover:bg-teal-600 text-white font-bold rounded-xl">Confirm slot</button>
+          <button type="button" onClick={onCancel} className="w-full mt-2 text-slate-500 text-sm py-2">Cancel</button>
+        </Modal>
+      );
+    }
+
+    function Intro({ candidate, job, onStart, onBack, onLogout, onSchedule, interviewScheduledAt, bypassSchedule }) {
+      const [lang, setLang] = useState("English");
+      const [showSched, setShowSched] = useState(false);
+      const schedMs = interviewScheduledAt ? new Date(interviewScheduledAt).getTime() : 0;
+      const blockStart = !bypassSchedule && schedMs > 0 && Date.now() < schedMs;
+      return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center">
+            <div className="w-16 h-16 bg-indigo-600 rounded-2xl mx-auto flex items-center justify-center mb-4 text-3xl">🎤</div>
+            <h1 className="text-2xl font-black text-white mb-1">Voice Interview</h1>
+            <p className="text-slate-400 text-sm mb-1">Hello, <span className="text-white font-bold">{candidate?.name}</span></p>
+            <p className="text-indigo-300 font-semibold mb-4">{job?.title}</p>
+            {interviewScheduledAt ? (
+              <p className="text-xs text-teal-300 mb-3">📅 Scheduled: {fmtDateTime(interviewScheduledAt)}</p>
+            ) : null}
+            <div className="bg-indigo-900/40 border border-indigo-800 rounded-xl p-3 mb-5 text-left text-xs text-indigo-200"><p className="font-bold text-indigo-100 mb-1">🎙️ How it works</p><p>Swar AI speaks questions aloud. Tap mic to answer.</p></div>
+            <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Language</label>
+            <select value={lang} onChange={e => setLang(e.target.value)} className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white mb-5">{["English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada", "Marathi", "Gujarati", "Malayalam"].map(l => <option key={l} value={l}>{l}</option>)}</select>
+            {blockStart ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time).</p> : null}
+            <button type="button" disabled={blockStart} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${blockStart ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
+            <button type="button" onClick={() => setShowSched(true)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl mb-3 border border-indigo-500/50">Maybe later</button>
+            <button type="button" onClick={onLogout} className="w-full py-3 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white font-bold rounded-xl mb-2">Logout</button>
+            <button type="button" onClick={onBack} className="text-slate-500 text-sm hover:text-slate-300">← Back</button>
+            {showSched ? (
+              <InterviewScheduleModal
+                jobTitle={job?.title}
+                onConfirm={(iso) => { onSchedule(iso); setShowSched(false); }}
+                onCancel={() => setShowSched(false)}
+              />
+            ) : null}
+          </div>
+        </div>
+      );
+    }
+
+    function Interview({ context, onEnd }) {
+      const [msgs, setMsgs] = useState([]), [busy, setBusy] = useState(false), [listening, setListening] = useState(false), [speaking, setSpeaking] = useState(false), [transcript, setTranscript] = useState(""), [qCount, setQCount] = useState(0), [hist, setHist] = useState([]), [ended, setEnded] = useState(false), [supported, setSupported] = useState(true), [micError, setMicError] = useState(""), [showText, setShowText] = useState(false), [textInput, setTextInput] = useState(""), [voices, setVoices] = useState([]);
+      const recRef = useRef(null), txRef = useRef(""), MAX = 6;
+      const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
+      const langCode = langMap[context.language] || "en-IN";
+      const sys = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX} questions, end with [INTERVIEW_COMPLETE].`;
+      useEffect(() => { const load = () => setVoices(window.speechSynthesis?.getVoices?.() || []); load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
+      useEffect(() => {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (!SR) { setSupported(false); setShowText(true); return; }
+        const rec = new SR();
+        rec.continuous = false; rec.interimResults = true; rec.lang = langCode;
+        rec.onresult = (e) => { let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; setTranscript(t); txRef.current = t; };
+        rec.onend = () => setListening(false);
+        rec.onerror = (e) => { setListening(false); if (e.error === "not-allowed") setMicError("Mic denied."); else if (e.error === "no-speech") setMicError("No speech."); else if (e.error !== "aborted") setMicError("Speech error."); };
+        recRef.current = rec;
+        return () => { try { rec.abort(); } catch {} };
+      }, [langCode]);
+      const speak = (text) => new Promise(resolve => {
+        if (!text || !window.speechSynthesis) { resolve(); return; }
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = langCode; u.rate = 0.95;
+        const v = voices.find(v => v.lang === langCode) || voices.find(v => v.lang.startsWith(langCode.split("-")[0]));
+        if (v) u.voice = v;
+        u.onstart = () => setSpeaking(true);
+        u.onend = () => { setSpeaking(false); resolve(); };
+        u.onerror = () => { setSpeaking(false); resolve(); };
+        window.speechSynthesis.speak(u);
+      });
+      useEffect(() => {
+        let cancelled = false;
+        (async () => {
+          await new Promise(r => setTimeout(r, 400));
+          if (cancelled) return;
+          setBusy(true);
+          const r = await callClaude([{ role: "user", content: "Start." }], sys);
+          if (cancelled) return;
+          const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
+          setMsgs([{ role: "ai", text: clean }]);
+          setHist([{ role: "user", content: "Start." }, { role: "assistant", content: r }]);
+          setBusy(false);
+          await speak(clean);
+        })();
+        return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
+      }, []);
+      const startListening = () => { if (!recRef.current || busy || ended) return; if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setTranscript(""); txRef.current = ""; setMicError(""); setListening(true); try { recRef.current.start(); } catch { setListening(false); } };
+      const stopAndSend = () => { if (recRef.current) { try { recRef.current.stop(); } catch {} } setListening(false); const a = (txRef.current || transcript).trim(); if (a) setTimeout(() => sendAnswer(a), 200); else setMicError("No speech."); };
+      const sendAnswer = async (text) => {
+        const answer = (text || "").trim();
+        if (!answer || busy || ended) return;
+        setTranscript(""); txRef.current = ""; setTextInput(""); setMicError("");
+        const h = [...hist, { role: "user", content: answer }];
+        setMsgs(p => [...p, { role: "user", text: answer }]);
+        setBusy(true);
+        const r = await callClaude(h, sys);
+        const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
+        const isLast = r.includes("[INTERVIEW_COMPLETE]") || qCount + 1 >= MAX;
+        setHist([...h, { role: "assistant", content: r }]);
+        setMsgs(p => [...p, { role: "ai", text: clean }]);
+        setQCount(c => c + 1);
+        setBusy(false);
+        await speak(clean);
+        if (isLast) { setEnded(true); setTimeout(() => onEnd([...msgs, { role: "user", text: answer }, { role: "ai", text: clean }]), 600); }
+      };
+      const endInterview = () => { if (window.speechSynthesis) window.speechSynthesis.cancel(); if (recRef.current) { try { recRef.current.abort(); } catch {} } onEnd(msgs); };
+      const lastAI = [...msgs].reverse().find(m => m.role === "ai");
+      return (
+        <div className="min-h-screen bg-slate-950 flex flex-col">
+          <div className="bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3"><div className={`w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center font-black text-white ${speaking ? "animate-pulse" : ""}`}>S</div><div><p className="font-bold text-white text-sm">Swar Voice Interview</p><p className="text-xs text-indigo-300">{context.language} · {qCount}/{MAX}</p></div></div>
+            <button onClick={endInterview} className="px-3 py-1.5 bg-red-900/40 text-red-300 rounded-lg text-xs font-bold border border-red-800/50">End</button>
+          </div>
+          <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 max-w-3xl mx-auto w-full">
+            <div className="mb-6 relative">
+              <div className={`w-40 h-40 rounded-full flex items-center justify-center text-white text-5xl font-black transition-all duration-500 shadow-2xl ${listening ? "bg-gradient-to-br from-red-500 to-rose-600 scale-105" : "bg-gradient-to-br from-indigo-500 to-purple-600"} ${speaking ? "scale-110" : ""}`}>{speaking ? "🔊" : listening ? "🎤" : "S"}</div>
+              {speaking && <div className="absolute inset-0 rounded-full border-4 border-indigo-400 animate-ping opacity-40"/>}
+              {listening && <div className="absolute inset-0 rounded-full border-4 border-red-400 animate-ping opacity-50"/>}
+            </div>
+            <div className="text-center mb-6 min-h-[3rem]">
+              {busy && <p className="text-indigo-300 text-sm animate-pulse">Swar is thinking…</p>}
+              {speaking && !busy && <p className="text-indigo-300 text-sm">🔊 Swar is speaking</p>}
+              {listening && <p className="text-red-300 text-sm animate-pulse">🎤 Listening…</p>}
+              {!busy && !speaking && !listening && !ended && <p className="text-slate-400 text-sm">Tap mic to answer</p>}
+              {ended && <p className="text-green-300 text-sm">✓ Complete</p>}
+              {micError && <p className="text-amber-400 text-xs mt-1">{micError}</p>}
+            </div>
+            {lastAI && <div className="max-w-xl w-full bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-4 text-center"><p className="text-xs uppercase font-black text-indigo-400 mb-2">Question</p><p className="text-white text-base">{lastAI.text}</p></div>}
+            {(transcript || listening) && <div className="max-w-xl w-full bg-red-900/20 border border-red-800/50 rounded-2xl p-4 mb-4"><p className="text-xs uppercase font-black text-red-300 mb-1">Your answer</p><p className="text-white">{transcript || <span className="text-slate-500 italic">Speak now…</span>}</p></div>}
+            {!ended && supported && (
+              <div className="flex flex-col items-center gap-3 my-4">
+                {!listening ? <button onClick={startListening} disabled={busy || speaking} className="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white shadow-2xl flex items-center justify-center text-3xl">🎤</button> : <button onClick={stopAndSend} className="w-20 h-20 rounded-full bg-red-600 text-white shadow-2xl flex items-center justify-center text-3xl animate-pulse">⏹</button>}
+              </div>
+            )}
+            {showText && !ended && (
+              <div className="max-w-xl w-full mt-4 flex gap-2">
+                <input value={textInput} onChange={e => setTextInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendAnswer(textInput)} placeholder="Type answer…" disabled={busy} className="flex-1 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white text-sm"/>
+                <button onClick={() => sendAnswer(textInput)} disabled={!textInput.trim() || busy} className="px-5 py-3 bg-indigo-600 text-white font-bold rounded-xl text-sm disabled:bg-slate-700">Send</button>
+              </div>
+            )}
+            {supported && !showText && !ended && <button onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>}
+            {!supported && <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-center text-amber-200 text-sm max-w-md">⚠ Browser doesn't support voice. Use text.</div>}
+          </div>
+        </div>
+      );
+    }
+
+    function Done({ onDash, isHR }) {
+      return (
+        <div className="min-h-screen bg-white flex flex-col items-center justify-center p-8 text-center">
+          <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-6 text-3xl">✓</div>
+          <h1 className="text-3xl font-black text-slate-900 mb-2">Interview Completed</h1>
+          <p className="text-slate-500 mb-5 max-w-md">Transcript recorded.</p>
+          <button onClick={onDash} className="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold">{isHR ? "HR Dashboard" : "Dashboard"}</button>
+        </div>
+      );
+    }
+
+    function Analysis({ context, transcript, onDecision, onBack, onLogout }) {
+      const [data, setData] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null), [remarks, setRemarks] = useState("");
+      useEffect(() => {
+        (async () => {
+          try {
+            const tx = transcript.map(t => `${t.role === "ai" ? "SWAR" : "CAND"}: ${t.text}`).join("\n");
+            const r = await callClaude([{ role: "user", content: `Analyse for "${context.jd.title}". Transcript:\n${tx}\n\nReturn JSON: {"summary":"3 sentences","strengths":["s1","s2","s3"],"areas":["a1","a2","a3"],"tech":7,"comm":8,"rec":"Hire"}` }], "Return only JSON.", true);
+            if (r) setData(r); else setErr("Could not parse.");
+          } catch (e) { setErr(e.message); } finally { setBusy(false); }
+        })();
+      }, []);
+      if (busy) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><Spin label="Generating analysis…"/></div>;
+      if (!data) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-center p-8 bg-white rounded-2xl"><p className="text-red-500 mb-4 text-sm">{err}</p><button onClick={onBack} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">Back</button></div></div>;
+      const recC = { "Strong Hire": "bg-green-500", "Hire": "bg-blue-500", "Weak Hire": "bg-amber-500", "No Hire": "bg-red-500" };
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-indigo-900 text-white px-6 py-8"><div className="max-w-4xl mx-auto flex items-start justify-between flex-wrap gap-3"><div><h2 className="text-3xl font-black mb-1">{context.candidateName}</h2><p className="text-indigo-200 text-sm">{context.jd.title}</p></div><div className="flex items-center gap-3"><span className={`px-4 py-2 rounded-xl text-white font-black text-sm ${recC[data.rec] || "bg-blue-500"}`}>{data.rec}</span><button onClick={onLogout} className="text-indigo-300 text-sm">Logout</button></div></div></div>
+          <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+            <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-slate-400 uppercase mb-3">Summary</h3><p className="text-slate-700">{data.summary}</p></div>
+            <div className="grid grid-cols-2 gap-4">{[["Technical", data.tech, "#6366f1"], ["Communication", data.comm, "#14b8a6"]].map(([l, v, col]) => <div key={l} className="bg-white rounded-2xl border border-slate-100 p-5"><p className="text-xs font-bold text-slate-400 mb-3">{l}</p><div className="flex items-center gap-3"><div className="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${v * 10}%`, backgroundColor: col }}/></div><span className="font-black text-slate-800 text-lg">{v}/10</span></div></div>)}</div>
+            <div className="grid grid-cols-2 gap-6">
+              <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-green-600 uppercase mb-4">Strengths</h3><ul className="space-y-2">{(data.strengths || []).map((s, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-green-500 font-bold">•</span>{s}</li>)}</ul></div>
+              <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-amber-600 uppercase mb-4">Improvements</h3><ul className="space-y-2">{(data.areas || []).map((a, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-amber-500 font-bold">•</span>{a}</li>)}</ul></div>
+            </div>
+            <div className="bg-white rounded-2xl border border-slate-100 p-6">
+              <h3 className="text-xs font-black text-slate-400 uppercase mb-3">HR Decision</h3>
+              <textarea rows={3} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Final remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
+              <div className="flex gap-3"><button onClick={() => onDecision("REJECTED", remarks, data)} className="flex-1 py-3 border-2 border-red-100 text-red-600 font-bold rounded-xl">Reject</button><button onClick={() => onDecision("SHORTLISTED", remarks, data)} className="flex-1 py-3 bg-green-600 text-white font-bold rounded-xl">Shortlist ✓</button></div>
+            </div>
+            <button onClick={onBack} className="w-full py-3 border border-slate-200 text-slate-500 font-bold rounded-xl">← Back</button>
+          </div>
+        </div>
+      );
+    }
+
+    function CandDash({ candidate, jobs, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected }) {
+      const job = jobs.find(j => j.id === candidate.jobId);
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
+            <div className="flex items-center gap-3"><div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-black text-sm">S</div><span className="font-bold">Candidate Portal</span><Badge/></div>
+            <div className="flex gap-2"><button type="button" onClick={onRights} className="px-3 py-1.5 border border-slate-600 text-slate-300 rounded-lg text-xs font-bold">🔒 Rights</button><button type="button" onClick={onLogout} className="text-slate-400 text-sm px-3">Logout</button></div>
+          </div>
+          <div className="max-w-3xl mx-auto px-6 py-8">
+            <div className="flex items-center gap-4 mb-5"><div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl font-black">{candidate.name[0]}</div><div><h1 className="text-2xl font-black text-slate-900">{candidate.name}</h1><p className="text-slate-500 text-sm">{candidate.email}</p></div></div>
+            {job ? (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-4">
+                <p className="text-xs font-black text-slate-400 uppercase mb-3">Active Application</p>
+                <div className="flex items-start justify-between mb-4 flex-wrap gap-2"><div><h2 className="text-xl font-bold text-slate-900">{job.title}</h2><p className="text-slate-500 text-sm">{job.designation} · {job.location}</p></div><span className={`text-xs font-black uppercase px-3 py-1.5 rounded-lg ${SB[candidate.status] || "bg-slate-100"}`}>{candidate.status}</span></div>
+                {candidate.remarks && <div className="bg-slate-50 rounded-xl p-4 mb-4"><p className="text-xs font-bold text-slate-400 mb-1">HR Remarks</p><p className="text-slate-700 text-sm italic">"{candidate.remarks}"</p></div>}
+                {getLatestAppForJob(candidate.applicationHistory, candidate.jobId)?.interviewScheduledAt ? (
+                  <p className="text-xs font-bold text-teal-700 mb-3">📅 Scheduled: {fmtDateTime(getLatestAppForJob(candidate.applicationHistory, candidate.jobId).interviewScheduledAt)}</p>
+                ) : null}
+                {(candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && !(candidate.transcript && candidate.transcript.length > 0) ? (
+                  <button onClick={() => onInterview(candidate.id)} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">🎤 Start Voice Interview →</button>
+                ) : null}
+                {candidate.status === "INTERVIEWED" && <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-center"><p className="text-teal-700 font-bold text-sm">✓ Under Review</p></div>}
+                {candidate.status === "REJECTED" && <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center"><p className="text-red-700 font-bold text-sm">Not Selected</p></div>}
+              </div>
+            ) : (
+              <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-10 text-center mb-4"><p className="text-slate-400 mb-4">No active application.</p><button onClick={onApply} className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-xl">Browse Jobs</button></div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
+              <button type="button" onClick={onApply} className="py-3 border border-slate-200 text-slate-600 font-bold rounded-xl hover:bg-slate-50 text-sm">Browse Jobs</button>
+              <button type="button" onClick={onTalentPool} className={`py-3 bg-gradient-to-r from-indigo-50 to-purple-50 border text-indigo-700 font-bold rounded-xl text-sm ${talentPoolSelected ? "ring-2 ring-indigo-400 border-indigo-300" : "border-indigo-200"}`}>🌟 Talent Pool</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    function RightsPanel({ candidate, jobs, onUpdate, onErase, onBack, dpo }) {
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 text-sm">← Back</button><span className="font-bold">My Data Rights</span><Badge/></div>
+          <div className="max-w-xl mx-auto px-4 py-8">
+            <h1 className="text-2xl font-black text-slate-900 mb-4">Your Data Rights (DPDPA 2023)</h1>
+            <div className="space-y-3">
+              <div className="bg-white border border-slate-200 rounded-xl p-4"><p className="font-bold text-sm">§11 Right to Access</p><p className="text-xs text-slate-500 mt-1">Status: {candidate.status} · Job: {jobs.find(j => j.id === candidate.jobId)?.title || "N/A"}</p></div>
+              <button onClick={() => { onUpdate({ consent: false, status: "WITHDRAWN" }); }} className="w-full bg-white border border-slate-200 rounded-xl p-4 text-left"><p className="font-bold text-sm">§6 Withdraw Consent</p></button>
+              <button onClick={() => { if (window.confirm("Erase all data?")) onErase(); }} className="w-full bg-white border border-red-100 rounded-xl p-4 text-left"><p className="font-bold text-sm text-red-600">§12 Right to Erasure</p></button>
+            </div>
+            <div className="mt-6 text-xs text-slate-500 text-center">Grievance Officer: <b>{(dpo || {}).name || "—"}</b><br/>{(dpo || {}).email || ""}</div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── MAIN APP ─────────────────────────────────────────────────────────────────
+    function App() {
+      const [step, setStep] = useState("LOADING");
+      const [loc, setLoc] = useState(() => ({ path: window.location.pathname, search: window.location.search }));
+      const [role, setRole] = useState(null), [hrId, setHrId] = useState(null);
+      const [activeId, setActiveId] = useState(null), [selJob, setSelJob] = useState(null), [pending, setPending] = useState([]);
+      const [jobs, setJobs] = useState([]), [candidates, setCandidates] = useState([]), [talentPool, setTalentPool] = useState([]), [auditLog, setAuditLog] = useState([]);
+      const [meta, setMeta] = useState(null);
+      const [storageReady, setStorageReady] = useState(false);
+      const [canPersist, setCanPersist] = useState(false);
+      const [tpFromPortal, setTpFromPortal] = useState(false);
+      const saveTimer = useRef(null);
+      /** When true, candidate login/register success ignores `returnTo` and goes to `/` (job board). Set only from JobBoardAuth “Login”. Cleared after success or when Apply / Talent Pool sends user to login. */
+      const candidateLoginPreferHomeRef = useRef(false);
+
+      const navigate = useCallback((url) => {
+        window.history.pushState({}, "", url);
+        setLoc({ path: window.location.pathname, search: window.location.search });
+      }, []);
+
+      useEffect(() => {
+        const onPop = () => setLoc({ path: window.location.pathname, search: window.location.search });
+        window.addEventListener("popstate", onPop);
+        return () => window.removeEventListener("popstate", onPop);
+      }, []);
+
+      const syncStateFromServer = async () => {
+        const jr = await fetch("/api/jobs", { headers: { ...authHeaders() } });
+        const jd = jr.ok ? await jr.json() : { jobs: [], meta: null };
+        const boardJobs = jd.jobs || [];
+        const sr = await fetch("/api/state");
+        if (!sr.ok) throw new Error("state");
+        const st = await sr.json();
+        const sm = Object.fromEntries(
+          boardJobs.map((j) => [
+            j.id,
+            { userStatus: j.userStatus, coolingDaysLeft: j.coolingDaysLeft },
+          ]),
+        );
+        const merged = (st.jobs || []).map((j) => ({
+          ...j,
+          ...(sm[j.id] || {}),
+        }));
+        setJobs(merged.length ? merged : boardJobs);
+        setCandidates(st.candidates || []);
+        setTalentPool(st.talentPool || []);
+        setAuditLog(st.auditLog || []);
+        setMeta(st.meta || jd.meta || null);
+        setCanPersist(true);
+      };
+
+      useEffect(() => {
+        (async () => {
+          let loaded = false;
+          let boardJobs = [];
+          let boardMeta = null;
+          try {
+            const jRes = await fetch("/api/jobs", { headers: { ...authHeaders() } });
+            if (jRes.ok) {
+              const jd = await jRes.json();
+              boardJobs = jd.jobs || [];
+              boardMeta = jd.meta || null;
+            }
+            const tok = localStorage.getItem(LS_TOKEN);
+            const r0 = localStorage.getItem(LS_ROLE);
+            if (tok && (r0 === "candidate" || r0 === "hr")) {
+              const sr = await fetch("/api/state");
+              if (sr.ok) {
+                const st = await sr.json();
+                const sm = Object.fromEntries(
+                  boardJobs.map((j) => [
+                    j.id,
+                    { userStatus: j.userStatus, coolingDaysLeft: j.coolingDaysLeft },
+                  ]),
+                );
+                const merged = (st.jobs || []).map((j) => ({
+                  ...j,
+                  ...(sm[j.id] || {}),
+                }));
+                setJobs(merged.length ? merged : boardJobs);
+                setCandidates(st.candidates || []);
+                setTalentPool(st.talentPool || []);
+                setAuditLog(st.auditLog || []);
+                setMeta(st.meta || boardMeta);
+                loaded = true;
+                setCanPersist(true);
+                if (r0 === "candidate") {
+                  const cid = localStorage.getItem(LS_CANDIDATE_ID);
+                  if (cid) setActiveId(cid);
+                  setRole("candidate");
+                }
+                if (r0 === "hr") {
+                  const hid = localStorage.getItem(LS_HR_ID);
+                  if (hid) setHrId(hid);
+                  setRole("hr");
+                }
+              } else {
+                setJobs(boardJobs);
+                setMeta(boardMeta);
+                loaded = true;
+                setCanPersist(false);
+              }
+            } else {
+              setJobs(boardJobs);
+              setMeta(boardMeta);
+              loaded = true;
+              setCanPersist(false);
+            }
+          } catch (e) {
+            console.error(e);
+            alert("Could not load data from the API. Start the backend (npm start), create the PostgreSQL database, set DATABASE_URL in backend/.env, and run database/schema.sql.");
+          } finally {
+            if (loaded) setStorageReady(true);
+            const rt = parsePath(window.location.pathname, window.location.search);
+            const tok = localStorage.getItem(LS_TOKEN);
+            const r0 = localStorage.getItem(LS_ROLE);
+            if (!loaded) {
+              setStep("LOGIN");
+            } else if (rt.name === "portal" && (r0 !== "candidate" || !tok)) {
+              window.history.replaceState({}, "", "/login?returnTo=" + encodeURIComponent("/portal"));
+              setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent("/portal") });
+              setStep("LOGIN");
+            } else if (rt.name === "apply" && (r0 !== "candidate" || !tok)) {
+              window.history.replaceState({}, "", "/login?returnTo=" + encodeURIComponent("/jobs/" + rt.jobId + "/apply"));
+              setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent("/jobs/" + rt.jobId + "/apply") });
+              setStep("LOGIN");
+            } else if (rt.name === "apply" && r0 === "candidate" && tok) {
+              const pick = boardJobs.find((x) => x.id === rt.jobId);
+              if (pick) setSelJob(pick);
+              setStep("CVUP");
+            } else if (rt.name === "login") setStep("LOGIN");
+            else if (rt.name === "register") setStep("CONSENT");
+            else if (rt.name === "portal" && r0 === "candidate" && tok) setStep("PORTAL");
+            else if (rt.name === "hr" && r0 === "hr" && tok) setStep("HR");
+            else if (rt.name === "cvAnalyser" && r0 === "hr" && tok) setStep("CV_ANALYSER");
+            else if (rt.name === "cvAnalyser") {
+              window.history.replaceState({}, "", "/login?returnTo=" + encodeURIComponent("/cv-analyser"));
+              setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent("/cv-analyser") });
+              setStep("LOGIN");
+            } else setStep("HOME");
+          }
+        })();
+      }, []);
+
+      useEffect(() => {
+        if (!storageReady) return;
+        const rt = parsePath(loc.path, loc.search);
+        if (rt.name !== "apply") return;
+        if (localStorage.getItem(LS_ROLE) !== "candidate") return;
+        const j = jobs.find((x) => x.id === rt.jobId);
+        if (j) setSelJob(j);
+      }, [loc.path, loc.search, storageReady, jobs]);
+
+      useEffect(() => {
+        if (!storageReady) return;
+        const rt = parsePath(loc.path, loc.search);
+        if (step === "CV_ANALYSER") {
+          if (rt.name === "cvAnalyser") return;
+          if (rt.name === "hr" && localStorage.getItem(LS_ROLE) === "hr" && localStorage.getItem(LS_TOKEN)) {
+            setStep("HR");
+            return;
+          }
+          if (rt.name === "home") setStep("HOME");
+          else if (rt.name === "login") setStep("LOGIN");
+          return;
+        }
+        const flowBlock = new Set(["CVUP", "INTRO", "INTERVIEW", "DONE", "CAND_DETAIL", "JOBMASTER", "SCREEN", "TP_BROWSE", "AUDIT", "ANALYSIS", "TP_SUBMIT", "RIGHTS", "FORGOT", "LOADING", "CV_ANALYSER"]);
+        if (flowBlock.has(step)) return;
+        const top = new Set(["HOME", "LOGIN", "CONSENT", "REG", "PORTAL", "HR"]);
+        if (!top.has(step)) return;
+        if (rt.name === "home") setStep("HOME");
+        else if (rt.name === "login") setStep("LOGIN");
+        else if (rt.name === "register") {
+          if (step !== "REG") setStep("CONSENT");
+        }
+        else if (rt.name === "portal") {
+          if (localStorage.getItem(LS_ROLE) === "candidate" && localStorage.getItem(LS_TOKEN)) setStep("PORTAL");
+        } else if (rt.name === "hr") {
+          if (localStorage.getItem(LS_ROLE) === "hr") setStep("HR");
+        } else if (rt.name === "cvAnalyser") {
+          if (localStorage.getItem(LS_ROLE) === "hr" && localStorage.getItem(LS_TOKEN)) setStep("CV_ANALYSER");
+        }
+      }, [loc.path, loc.search, storageReady, step]);
+
+      useEffect(() => {
+        if (!storageReady || !canPersist) return;
+        clearTimeout(saveTimer.current);
+        saveTimer.current = setTimeout(() => {
+          fetch("/api/state", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobs, candidates, talentPool, auditLog }),
+          }).then((r) => { if (!r.ok) r.text().then((t) => console.error("Save failed:", t)); }).catch((err) => console.error(err));
+        }, 800);
+        return () => clearTimeout(saveTimer.current);
+      }, [jobs, candidates, talentPool, auditLog, storageReady, canPersist]);
+
+      const active = candidates.find(c => c.id === activeId);
+      const upd = u => setCandidates(p => p.map(c => c.id === activeId ? { ...c, ...u } : c));
+      const company = meta?.companyName || "Indira IVF";
+      const jd = selJob ? { ...selJob, companyName: company } : { id: "default", title: "Open Role", description: "", companyName: company };
+      const cmCooling = meta?.coolingMonths ?? 3;
+      const maxCvMb = meta?.maxCvMb ?? 5;
+
+      const logAudit = (action, target, details) => setAuditLog(p => [...p, { id: "AUD-" + Date.now() + "-" + Math.random().toString(36).slice(2, 6), timestamp: new Date().toISOString(), actor: hrId || "HR", action, target, details }]);
+
+      const handlePasswordReset = async (email, newPw) => {
+        try {
+          const res = await fetch("/api/auth/candidate/reset-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, newPassword: newPw }),
+          });
+          const errBody = await res.json().catch(() => ({}));
+          if (!res.ok) { alert(errBody.error || "Reset failed"); return; }
+          const st = await (await fetch("/api/state")).json();
+          setCandidates(st.candidates || []);
+        } catch (e) {
+          alert("Could not reach server.");
+        }
+      };
+      const logout = () => {
+        localStorage.removeItem(LS_TOKEN);
+        localStorage.removeItem(LS_ROLE);
+        localStorage.removeItem(LS_CANDIDATE_ID);
+        localStorage.removeItem(LS_HR_ID);
+        setStep("HOME");
+        setRole(null);
+        setHrId(null);
+        setActiveId(null);
+        setSelJob(null);
+        setCanPersist(false);
+        navigate("/");
+      };
+
+      const handleApplyToJob = (job) => {
+        if (!active) return;
+        const latest = getLatestAppForJob(active.applicationHistory, job.id);
+        if (latest && !latest.interviewCompletedAt) {
+          setSelJob(job);
+          setStep("INTRO");
+          return;
+        }
+        const status = getCoolingStatus(active.applicationHistory, job.id, cmCooling);
+        if (!status.canApply && !status.pendingInterview) { alert(`⏳ Cooling period active. Re-apply in ${status.daysRemaining} days (on ${fmtDate(status.eligibleAt)}).`); return; }
+        setSelJob(job); setStep("CVUP");
+      };
+
+      const handleJobBoardApply = (job) => {
+        const tok = localStorage.getItem(LS_TOKEN);
+        const r0 = localStorage.getItem(LS_ROLE);
+        if (!tok || r0 !== "candidate") {
+          candidateLoginPreferHomeRef.current = false;
+          navigate("/login?returnTo=" + encodeURIComponent("/jobs/" + job.id + "/apply"));
+          setStep("LOGIN");
+          return;
+        }
+        if (!active) return;
+        handleApplyToJob(job);
+      };
+
+      const handleCVUploaded = (file) => {
+        if (!file || !active || !selJob) return;
+        const newApp = {
+          jobId: selJob.id,
+          appliedAt: new Date().toISOString(),
+          interviewScheduledAt: undefined,
+          interviewCompletedAt: undefined,
+        };
+        upd({ cv: file.cvText, cvFile: file, status: "APPLIED", jobId: selJob.id, applicationHistory: [...(active.applicationHistory || []), newApp] });
+        setStep("INTRO");
+      };
+      const handleTalentPoolMap = (entry, jobId) => {
+        const existing = candidates.find(c => c.email.toLowerCase() === entry.email.toLowerCase());
+        const newApp = { jobId, appliedAt: new Date().toISOString(), interviewScheduledAt: undefined, interviewCompletedAt: undefined };
+        if (existing) {
+          setCandidates(p => p.map(c => c.id === existing.id ? { ...c, status: "APPLIED", jobId, applicationHistory: [...(c.applicationHistory || []), newApp], cv: entry.cvText, cvFile: entry.cvFile, fromTalentPool: true } : c));
+        } else {
+          const nc = { id: "C" + Date.now(), name: entry.name, email: entry.email, password: "talentpool" + Date.now(), cv: entry.cvText, cvFile: entry.cvFile, status: "APPLIED", jobId, applicationHistory: [newApp], consent: true, consentAt: entry.submittedAt, purposes: ["identity", "cv", "interview", "ai"], grievances: [], fromTalentPool: true };
+          setCandidates(p => [...p, nc]);
+        }
+        setTalentPool(p => p.map(t => t.id === entry.id ? { ...t, mappedToJobs: [...(t.mappedToJobs || []), { jobId, mappedAt: new Date().toISOString(), mappedBy: hrId || "HR" }] } : t));
+      };
+
+      const authCandidate = role === "candidate" && !!localStorage.getItem(LS_TOKEN);
+      const authStripReady = storageReady && (role !== "candidate" || !localStorage.getItem(LS_CANDIDATE_ID) || Boolean(active));
+      const candidateFirstName = (active?.name && String(active.name).trim().split(/\s+/)[0]) || "";
+
+      if (step === "LOADING") return (
+        <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-14 h-14 bg-indigo-600 rounded-2xl mx-auto flex items-center justify-center mb-4 shadow-2xl"><span className="text-white text-2xl font-black">S</span></div>
+            <div className="w-8 h-8 border-4 border-indigo-800 border-t-indigo-400 rounded-full animate-spin mx-auto mb-3"/>
+            <p className="text-slate-500 text-sm">Loading…</p>
+          </div>
+        </div>
+      );
+
+      return (
+        <div style={{ fontFamily: "'DM Sans','Segoe UI',system-ui,sans-serif" }}>
+          {step === "LOGIN" && (
+            <Login
+              coolingMonths={meta?.coolingMonths}
+              dpo={meta?.dpo}
+              onCandSuccess={async ({ candidateId, token }) => {
+                if (token) localStorage.setItem(LS_TOKEN, token);
+                localStorage.setItem(LS_ROLE, "candidate");
+                localStorage.setItem(LS_CANDIDATE_ID, candidateId);
+                setRole("candidate");
+                setActiveId(candidateId);
+                try {
+                  await syncStateFromServer();
+                } catch (e) {}
+                const preferHome = candidateLoginPreferHomeRef.current;
+                candidateLoginPreferHomeRef.current = false;
+                const sp = new URLSearchParams(window.location.search);
+                const dest = preferHome ? "/" : (sp.get("returnTo") || "/");
+                const applyMatch = dest.match(/^\/jobs\/([^/]+)\/apply$/);
+                if (applyMatch) {
+                  const jr2 = await fetch("/api/jobs", { headers: { ...authHeaders() } });
+                  if (jr2.ok) {
+                    const jd2 = await jr2.json();
+                    const jj = (jd2.jobs || []).find((x) => x.id === applyMatch[1]);
+                    if (jj) setSelJob(jj);
+                  }
+                }
+                navigate(dest);
+                if (dest === "/portal") setStep("PORTAL");
+                else if (applyMatch) setStep("CVUP");
+                else setStep("HOME");
+              }}
+              onHrSuccess={async ({ hrId, token }) => {
+                if (token) localStorage.setItem(LS_TOKEN, token);
+                localStorage.setItem(LS_ROLE, "hr");
+                localStorage.setItem(LS_HR_ID, hrId);
+                setRole("hr");
+                setHrId(hrId);
+                try {
+                  await syncStateFromServer();
+                } catch (e) {}
+                const sp = new URLSearchParams(window.location.search);
+                const dest = sp.get("returnTo") || "/hr";
+                navigate(dest);
+                if (dest === "/cv-analyser") setStep("CV_ANALYSER");
+                else if (dest === "/" || dest === "") setStep("HOME");
+                else setStep("HR");
+              }}
+              onRegister={() => { navigate("/register"); setStep("CONSENT"); }}
+              onForgot={() => setStep("FORGOT")}
+            />
+          )}
+          {step === "FORGOT" && <ForgotPassword candidates={candidates} onReset={handlePasswordReset} onBack={() => { navigate("/login"); setStep("LOGIN"); }}/>}
+          {step === "CONSENT" && (
+            <ConsentScreen
+              dataCategories={meta?.dataCategories}
+              coolingMonths={meta?.coolingMonths}
+              dpo={meta?.dpo}
+              onAccept={p => { setPending(p); setStep("REG"); }}
+              onDecline={() => { navigate("/login"); setStep("LOGIN"); }}
+            />
+          )}
+          {step === "REG" && <CandReg onRegister={async f => {
+            if (!f.name.trim()) return;
+            try {
+              const res = await fetch("/api/auth/register", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: f.name, email: f.email, password: f.password, purposes: pending }),
+              });
+              const data = await res.json().catch(() => ({}));
+              if (!res.ok) { alert(data.error || "Registration failed"); return; }
+              if (data.token) localStorage.setItem(LS_TOKEN, data.token);
+              localStorage.setItem(LS_ROLE, "candidate");
+              if (data.candidateId) localStorage.setItem(LS_CANDIDATE_ID, data.candidateId);
+              setRole("candidate");
+              setActiveId(data.candidateId);
+              try {
+                await syncStateFromServer();
+              } catch (e) {}
+              const preferHome = candidateLoginPreferHomeRef.current;
+              candidateLoginPreferHomeRef.current = false;
+              const sp = new URLSearchParams(window.location.search);
+              const dest = preferHome ? "/" : (sp.get("returnTo") || "/");
+              const applyMatch = dest.match(/^\/jobs\/([^/]+)\/apply$/);
+              if (applyMatch) {
+                const jr2 = await fetch("/api/jobs", { headers: { ...authHeaders() } });
+                if (jr2.ok) {
+                  const jd2 = await jr2.json();
+                  const jj = (jd2.jobs || []).find((x) => x.id === applyMatch[1]);
+                  if (jj) setSelJob(jj);
+                }
+              }
+              navigate(dest);
+              if (dest === "/portal") setStep("PORTAL");
+              else if (applyMatch) setStep("CVUP");
+              else setStep("HOME");
+            } catch (e) {
+              alert("Could not reach server.");
+            }
+          }} onBack={() => { navigate("/login"); setStep("LOGIN"); }}/>}
+          {step === "HOME" && (
+            <Jobs
+              jobs={jobs}
+              applicationHistory={active?.applicationHistory || []}
+              onApply={handleJobBoardApply}
+              onContinueInterview={(job) => {
+                setSelJob(job);
+                setStep("INTRO");
+              }}
+              onTalentPool={() => {
+                setTpFromPortal(false);
+                const tok = localStorage.getItem(LS_TOKEN);
+                const r0 = localStorage.getItem(LS_ROLE);
+                if (!tok || r0 !== "candidate") {
+                  candidateLoginPreferHomeRef.current = false;
+                  navigate("/login?returnTo=" + encodeURIComponent("/"));
+                  setStep("LOGIN");
+                  return;
+                }
+                setStep("TP_SUBMIT");
+              }}
+              onBack={() => {}}
+              coolingMonths={cmCooling}
+              showBack={false}
+              authStripReady={authStripReady}
+              authCandidate={authCandidate}
+              onTalentPoolPortal={() => { navigate("/portal"); setStep("PORTAL"); }}
+              jobBoardAuth={
+                <JobBoardAuth
+                  authStripReady={authStripReady}
+                  sessionRole={role}
+                  candidateFirstName={candidateFirstName}
+                  onLoginClick={() => {
+                    candidateLoginPreferHomeRef.current = true;
+                    navigate("/login");
+                    setStep("LOGIN");
+                  }}
+                  onLogoutClick={logout}
+                  onGoToAts={() => { navigate("/hr"); setStep("HR"); }}
+                />
+              }
+            />
+          )}
+          {step === "HR" && (
+            <HRBridge onLogout={logout}>
+              <HRDash candidates={candidates} jobs={jobs} talentPool={talentPool} auditLog={auditLog} onView={id => { setActiveId(id); setStep("CAND_DETAIL"); }} onInterview={id => { setActiveId(id); setStep("INTRO"); }} onAnalysis={id => { setActiveId(id); setStep("ANALYSIS"); }} onCvAnalyser={() => { navigate("/cv-analyser"); setStep("CV_ANALYSER"); }} onJobs={() => setStep("JOBMASTER")} onScreen={() => setStep("SCREEN")} onTalentPool={() => setStep("TP_BROWSE")} onAuditLog={() => setStep("AUDIT")} onLogout={logout}/>
+            </HRBridge>
+          )}
+          {step === "CAND_DETAIL" && active && <CandidateDetail candidate={active} jobs={jobs} onUpdate={upd} onInterview={() => setStep("INTRO")} onAnalysis={() => setStep("ANALYSIS")} onBack={() => setStep("HR")}/>}
+          {step === "JOBMASTER" && <JobMaster jobs={jobs} onSave={setJobs} onBack={() => setStep("HR")}/>}
+          {step === "SCREEN" && <Screening candidates={candidates} jobs={jobs} onShortlist={u => { setCandidates(u); setStep("HR"); }} onBack={() => setStep("HR")}/>}
+          {step === "TP_BROWSE" && <TalentPoolBrowse talentPool={talentPool} jobs={jobs} candidates={candidates} onMapToJob={handleTalentPoolMap} onLogAudit={logAudit} onBack={() => setStep("HR")} coolingMonths={cmCooling}/>}
+          {step === "AUDIT" && <AuditLogView auditLog={auditLog} onBack={() => setStep("HR")}/>}
+          {step === "CV_ANALYSER" && (
+            <HRBridge onLogout={logout}>
+              <CVAnalyserPage onBack={() => { navigate("/hr"); setStep("HR"); }} onSynced={syncStateFromServer} />
+            </HRBridge>
+          )}
+          {step === "ANALYSIS" && active?.transcript && <Analysis context={{ jd, candidateName: active.name, language: active.lang || "English" }} transcript={active.transcript} onDecision={(s, r, a) => { upd({ status: s, remarks: r, analysis: a }); setStep("HR"); }} onBack={() => setStep("HR")} onLogout={logout}/>}
+          {step === "CVUP" && selJob && <CVUpload jobTitle={selJob.title} maxCvMb={maxCvMb} onComplete={handleCVUploaded} onBack={() => { navigate("/"); setStep("HOME"); setSelJob(null); }}/>}
+          {step === "TP_SUBMIT" && <TalentPoolSubmit candidate={active} maxCvMb={maxCvMb} onSubmit={(entry) => setTalentPool(p => [...p, entry])} onBack={() => {
+            if (tpFromPortal) { navigate("/portal"); setStep("PORTAL"); }
+            else { navigate("/"); setStep("HOME"); }
+          }}/>}
+          {step === "INTRO" && active && (
+            <Intro
+              candidate={active}
+              job={selJob || jobs.find(j => j.id === active?.jobId)}
+              bypassSchedule={role === "hr"}
+              interviewScheduledAt={getLatestAppForJob(active.applicationHistory, selJob?.id || active?.jobId)?.interviewScheduledAt}
+              onSchedule={(iso) => {
+                const jid = selJob?.id || active?.jobId;
+                if (!jid) return;
+                upd({ applicationHistory: patchLatestApp(active.applicationHistory, jid, { interviewScheduledAt: iso }) });
+              }}
+              onLogout={logout}
+              onStart={lang => { upd({ lang }); setStep("INTERVIEW"); }}
+              onBack={() => {
+                if (role === "hr") setStep("HR");
+                else {
+                  const rt = parsePath(window.location.pathname, window.location.search);
+                  if (rt.name === "apply") { navigate("/"); setStep("HOME"); }
+                  else { navigate("/portal"); setStep("PORTAL"); }
+                }
+              }}
+            />
+          )}
+          {step === "INTERVIEW" && active && <Interview context={{ jd, candidateName: active.name, language: active.lang || "English" }} onEnd={t => {
+            const jid = selJob?.id || active?.jobId;
+            let nextHist = active.applicationHistory;
+            if (jid) nextHist = patchLatestApp(active.applicationHistory, jid, { interviewCompletedAt: new Date().toISOString() });
+            upd({ transcript: t, status: "INTERVIEWED", applicationHistory: nextHist });
+            setStep("DONE");
+          }}/>}
+          {step === "DONE" && <Done isHR={role === "hr"} onDash={() => {
+            if (role === "hr") setStep("HR");
+            else {
+              const rt = parsePath(window.location.pathname, window.location.search);
+              if (rt.name === "apply") { navigate("/"); setStep("HOME"); }
+              else { navigate("/portal"); setStep("PORTAL"); }
+            }
+          }}/>}
+          {step === "PORTAL" && active && <CandDash candidate={active} jobs={jobs} onApply={() => { navigate("/"); setStep("HOME"); }} onTalentPool={() => { setTpFromPortal(true); setStep("TP_SUBMIT"); }} onInterview={id => { setActiveId(id); setStep("INTRO"); }} onRights={() => setStep("RIGHTS")} onLogout={logout} talentPoolSelected={true}/>}
+          {step === "RIGHTS" && active && <RightsPanel candidate={active} jobs={jobs} dpo={meta?.dpo} onUpdate={upd} onErase={() => {
+            setCandidates(p => p.filter(c => c.id !== activeId));
+            setActiveId(null);
+            localStorage.removeItem(LS_TOKEN);
+            localStorage.removeItem(LS_ROLE);
+            localStorage.removeItem(LS_CANDIDATE_ID);
+            navigate("/login");
+            setStep("LOGIN");
+            setCanPersist(false);
+          }} onBack={() => { navigate("/portal"); setStep("PORTAL"); }}/>}
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
