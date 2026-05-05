@@ -70,6 +70,30 @@
 
     const SB = { REGISTERED: "bg-slate-100 text-slate-600", APPLIED: "bg-amber-100 text-amber-700", SHORTLISTED: "bg-blue-100 text-blue-700", INTERVIEWED: "bg-teal-100 text-teal-700", REJECTED: "bg-red-100 text-red-600", WITHDRAWN: "bg-purple-100 text-purple-700" };
 
+    const TP_SOURCE_OPTIONS = [
+      { value: "", label: "— Select source —" },
+      { value: "Job Portal - Naukri", label: "Job Portal - Naukri" },
+      { value: "Job Portal - Indeed", label: "Job Portal - Indeed" },
+      { value: "Employee Referral", label: "Employee Referral" },
+      { value: "Social Media - Whatsapp", label: "Social Media - Whatsapp" },
+      { value: "Social Media - LinkedIn", label: "Social Media - LinkedIn" },
+      { value: "Careers Website", label: "Careers Website" },
+      { value: "Recruitment Consultant", label: "Recruitment Consultant" },
+    ];
+
+    const INDIAN_CITIES_FALLBACK = [
+      "Agartala", "Agra", "Ahmedabad", "Aizawl", "Ajmer", "Akola", "Aligarh", "Allahabad", "Ambala", "Amravati", "Amritsar", "Asansol", "Aurangabad",
+      "Bangalore", "Bareilly", "Belgaum", "Bhopal", "Bhubaneswar", "Bikaner", "Bilaspur", "Bokaro", "Chandigarh", "Chennai", "Coimbatore", "Cuttack",
+      "Dehradun", "Delhi", "Dhanbad", "Dibrugarh", "Dimapur", "Durgapur", "Erode", "Faridabad", "Firozabad", "Ghaziabad", "Gorakhpur", "Guntur", "Guwahati", "Gwalior",
+      "Hisar", "Hubli", "Hyderabad", "Imphal", "Indore", "Itanagar", "Jabalpur", "Jaipur", "Jalandhar", "Jammu", "Jamnagar", "Jamshedpur", "Jodhpur", "Jorhat",
+      "Kalyan", "Kanpur", "Kochi", "Kohima", "Kolhapur", "Kolkata", "Kollam", "Kota", "Kozhikode",
+      "Lucknow", "Ludhiana", "Madurai", "Mangalore", "Meerut", "Moradabad", "Mumbai", "Muzaffarpur", "Mysore",
+      "Nagpur", "Nashik", "Nellore", "New Delhi", "Noida",
+      "Goa", "Panaji", "Panipat", "Patna", "Pondicherry", "Pune", "Raipur", "Rajkot", "Ranchi", "Rohtak", "Rourkela",
+      "Salem", "Shillong", "Shimla", "Silchar", "Siliguri", "Solapur", "Srinagar", "Surat",
+      "Thane", "Thiruvananthapuram", "Thrissur", "Tiruchirappalli", "Tirupati", "Udaipur", "Ujjain", "Vadodara", "Varanasi", "Vijayawada", "Visakhapatnam", "Warangal",
+    ].map((s) => s.trim()).filter(Boolean);
+
     const LS_TOKEN = "swar_token";
     const LS_ROLE = "swar_role";
     const LS_CANDIDATE_ID = "swar_candidate_id";
@@ -509,13 +533,42 @@
 
     function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnalysis, onBack }) {
       const [showCV, setShowCV] = useState(false), [showTranscript, setShowTranscript] = useState(true), [remarks, setRemarks] = useState(candidate.remarks || ""), [flash, setFlash] = useState("");
+      const [detailTab, setDetailTab] = useState("timeline");
+      const [interviewAns, setInterviewAns] = useState(null);
+      const [interviewLoading, setInterviewLoading] = useState(false);
+      const applicationIdForInterview = getLatestAppForJob(candidate.applicationHistory, candidate.jobId)?.applicationId;
       const appliedList = (candidate.applicationHistory || []).map(a => ({ ...a, job: jobs.find(j => j.id === a.jobId) })).filter(a => a.job);
       const setStatus = (s) => { onUpdate({ status: s, remarks }); setFlash(`Updated to ${s}`); setTimeout(onBack, 800); };
+      useEffect(() => {
+        if (detailTab !== "interview") {
+          setInterviewAns(null);
+          return;
+        }
+        if (!applicationIdForInterview) return;
+        setInterviewLoading(true);
+        const tok = localStorage.getItem(LS_TOKEN);
+        fetch(`/api/admin/applications/${applicationIdForInterview}/interview-answers`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
+          .then((r) => (r.ok ? r.json() : { answers: [] }))
+          .then(setInterviewAns)
+          .catch(() => setInterviewAns({ answers: [] }))
+          .finally(() => setInterviewLoading(false));
+      }, [detailTab, applicationIdForInterview]);
+      const interviewAnswers = interviewAns?.answers || [];
+      const interviewDur = interviewAnswers.reduce((s, a) => s + (a.durationSeconds || 0), 0);
       return (
         <div className="min-h-screen bg-slate-50">
-          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Candidate Details</span><Badge/></div>
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button type="button" onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Candidate Details</span><Badge/></div>
           <div className="max-w-4xl mx-auto px-6 py-8 space-y-4">
             {flash && <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded-xl text-sm">✓ {flash}</div>}
+            <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-3">
+              {[
+                { id: "timeline", label: "Timeline" },
+                { id: "interview", label: "Interview" },
+                { id: "notes", label: "Notes" },
+              ].map((t) => (
+                <button key={t.id} type="button" onClick={() => setDetailTab(t.id)} className={`px-4 py-2 rounded-xl text-sm font-bold transition-colors ${detailTab === t.id ? "bg-indigo-600 text-white" : "bg-white border border-slate-200 text-slate-600 hover:border-indigo-200"}`}>{t.label}</button>
+              ))}
+            </div>
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex items-start justify-between flex-wrap gap-3">
               <div className="flex items-center gap-4">
                 <div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl font-black">{candidate.name[0]}</div>
@@ -523,6 +576,7 @@
               </div>
               <span className={`text-xs font-black uppercase px-3 py-1.5 rounded-lg ${SB[candidate.status] || "bg-slate-100"}`}>{candidate.status}</span>
             </div>
+            {detailTab === "timeline" ? (<>
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
               <h2 className="text-xs font-black text-slate-400 uppercase mb-3">DPDPA Consent</h2>
               {candidate.consent ? <p className="text-sm text-slate-700">✓ Granted on {fmtDate(candidate.consentAt)}</p> : <p className="text-sm text-red-700">⚠ No consent — cannot process per §6</p>}
@@ -535,13 +589,13 @@
             )}
             {candidate.cv && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <button onClick={() => setShowCV(!showCV)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">CV / Resume {candidate.cvFile && `(${candidate.cvFile.ext.toUpperCase()})`}</h2><span className="text-indigo-500 text-xs font-bold">{showCV ? "▲ Hide" : "▼ Show"}</span></button>
+                <button type="button" onClick={() => setShowCV(!showCV)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">CV / Resume {candidate.cvFile && `(${candidate.cvFile.ext.toUpperCase()})`}</h2><span className="text-indigo-500 text-xs font-bold">{showCV ? "▲ Hide" : "▼ Show"}</span></button>
                 {showCV && (
                   <div className="mt-4 bg-slate-50 rounded-xl p-4 border border-slate-100">
                     {candidate.cvFile && (
                       <div className="flex items-center justify-between mb-3 pb-3 border-b border-slate-200">
                         <div className="flex items-center gap-2 text-sm"><span className="text-2xl">{fileIcon(candidate.cvFile.ext)}</span><div><p className="font-bold text-slate-800">{candidate.cvFile.name}</p><p className="text-xs text-slate-500">{fmtSize(candidate.cvFile.size)}</p></div></div>
-                        <button onClick={() => downloadDataUrl(candidate.cvFile.dataUrl, candidate.cvFile.name)} className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg">⬇ Download</button>
+                        <button type="button" onClick={() => downloadDataUrl(candidate.cvFile.dataUrl, candidate.cvFile.name)} className="px-3 py-1.5 bg-indigo-600 text-white text-xs font-bold rounded-lg">⬇ Download</button>
                       </div>
                     )}
                     <pre className="text-sm text-slate-700 whitespace-pre-wrap font-sans">{candidate.cv}</pre>
@@ -551,7 +605,7 @@
             )}
             {candidate.transcript && candidate.transcript.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <button onClick={() => setShowTranscript(!showTranscript)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">Interview · {candidate.transcript.length} msgs · {candidate.lang || "English"}</h2><span className="text-indigo-500 text-xs font-bold">{showTranscript ? "▲" : "▼"}</span></button>
+                <button type="button" onClick={() => setShowTranscript(!showTranscript)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">Interview transcript · {candidate.transcript.length} msgs · {candidate.lang || "English"}</h2><span className="text-indigo-500 text-xs font-bold">{showTranscript ? "▲" : "▼"}</span></button>
                 {showTranscript && <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">{candidate.transcript.map((e, i) => <div key={i} className={`flex ${e.role === "ai" ? "justify-start" : "justify-end"}`}><div className={`max-w-md p-3 rounded-2xl text-sm ${e.role === "ai" ? "bg-slate-100 text-slate-800" : "bg-indigo-600 text-white"}`}><p className="text-xs uppercase font-black mb-1 opacity-50">{e.role === "ai" ? "Swar" : "Candidate"}</p>{e.text}</div></div>)}</div>}
               </div>
             )}
@@ -562,37 +616,166 @@
                 <div className="grid grid-cols-2 gap-3"><div className="bg-indigo-50 rounded-xl p-3"><p className="text-xs text-indigo-500 font-bold mb-1">Technical</p><p className="text-2xl font-black text-indigo-700">{candidate.analysis.tech}/10</p></div><div className="bg-teal-50 rounded-xl p-3"><p className="text-xs text-teal-500 font-bold mb-1">Communication</p><p className="text-2xl font-black text-teal-700">{candidate.analysis.comm}/10</p></div></div>
               </div>
             )}
+            </>) : null}
+            {detailTab === "interview" ? (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+                {!applicationIdForInterview ? (
+                  <p className="text-sm text-slate-500">No application linked to the active role.</p>
+                ) : interviewLoading ? (
+                  <p className="text-sm text-slate-500">Loading…</p>
+                ) : interviewAnswers.length === 0 ? (
+                  <p className="text-sm text-slate-500">Voice interview not yet completed.</p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap gap-4 text-sm text-slate-600 border-b border-slate-100 pb-3">
+                      <span><span className="font-bold text-slate-800">{interviewAnswers.filter((a) => a.answerText).length}</span> / {interviewAnswers.length} answered</span>
+                      <span>Total audio: <span className="font-bold text-slate-800">{interviewDur}s</span></span>
+                    </div>
+                    <div className="space-y-4">
+                      {interviewAnswers.map((a) => {
+                        const typeLabel = a.questionType === "yes_no" ? "Yes/No" : a.questionType === "scale_1_5" ? "Scale 1–5" : "Open-ended";
+                        return (
+                          <div key={`${a.index}-${a.questionText?.slice(0, 20)}`} className="border border-slate-200 rounded-xl p-4 bg-slate-50/80">
+                            <p className="text-xs text-slate-500 mb-1">Q{a.index} · {typeLabel}{a.askedAt ? ` · Asked ${fmtDateTime(a.askedAt)}` : ""}</p>
+                            <p className="text-sm font-semibold text-slate-900 mb-2">&quot;{a.questionText}&quot;</p>
+                            <div className="border-t border-slate-200 pt-2 mt-2">
+                              <p className="text-xs font-bold text-teal-700 mb-1">Answer{a.durationSeconds ? ` (${a.durationSeconds}s)` : ""}</p>
+                              <p className="text-sm text-slate-700 whitespace-pre-wrap">{a.answerText || "—"}</p>
+                              {a.audioUrl ? <audio controls className="mt-2 w-full max-w-md" src={a.audioUrl}><track kind="captions"/></audio> : null}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : null}
+            {detailTab === "notes" ? (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
               <h2 className="text-xs font-black text-slate-400 uppercase mb-3">HR Actions</h2>
-              <textarea rows={2} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
+              <textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
               <div className="grid grid-cols-2 gap-2">
-                {candidate.consent && candidate.status === "APPLIED" && <button onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
-                {candidate.consent && !(candidate.transcript && candidate.transcript.length > 0) && (candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && <button onClick={onInterview} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
-                {(candidate.status === "INTERVIEWED" || candidate.analysis) && <button onClick={onAnalysis} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>}
-                {candidate.status !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button onClick={() => { if (window.confirm("Reject?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
+                {candidate.consent && candidate.status === "APPLIED" && <button type="button" onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
+                {candidate.consent && !(candidate.transcript && candidate.transcript.length > 0) && (candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && <button type="button" onClick={onInterview} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
+                {(candidate.status === "INTERVIEWED" || candidate.analysis) && <button type="button" onClick={onAnalysis} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>}
+                {candidate.status !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button type="button" onClick={() => { if (window.confirm("Reject?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
               </div>
             </div>
+            ) : null}
           </div>
         </div>
       );
     }
 
     function JobMaster({ jobs, onSave, onBack }) {
-      const [local, setLocal] = useState(jobs), [edit, setEdit] = useState(null), [form, setForm] = useState({ title: "", designation: "", location: "", description: "", requirements: "" }), [saved, setSaved] = useState(false);
-      const saveJob = () => { if (!form.title.trim()) return; edit === "new" ? setLocal(p => [...p, { ...form, id: "j-" + Date.now() }]) : setLocal(p => p.map(j => j.id === edit ? { ...j, ...form } : j)); setEdit(null); };
+      const MAX_Q = 20;
+      const defaultRows = () => Array.from({ length: 5 }, () => ({ question: "", questionType: "open_ended" }));
+      const [local, setLocal] = useState(jobs);
+      const [edit, setEdit] = useState(null);
+      const [form, setForm] = useState({ title: "", designation: "", location: "", description: "", requirements: "" });
+      const [questionRows, setQuestionRows] = useState(defaultRows);
+      const [qErrors, setQErrors] = useState({});
+      const [saved, setSaved] = useState(false);
+      const [toast, setToast] = useState("");
+      const normalizeRowsFromJob = (j) => {
+        const iq = (j.interviewQuestions || []).slice().sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
+        const mapped = iq.map((q) => ({
+          question: q.question || "",
+          questionType: ["open_ended", "yes_no", "scale_1_5"].includes(q.questionType) ? q.questionType : "open_ended",
+          id: q.id,
+        }));
+        if (mapped.length === 0) return defaultRows();
+        return [...mapped, { question: "", questionType: "open_ended" }].slice(0, MAX_Q);
+      };
+      const saveJob = () => {
+        if (!form.title.trim()) return;
+        const errs = {};
+        const filled = [];
+        questionRows.forEach((row, i) => {
+          const t = row.question.trim();
+          if (!t) return;
+          if (t.length < 10 || t.length > 500) errs[i] = "Min 10 characters, max 500.";
+          filled.push({
+            question: t,
+            questionType: ["open_ended", "yes_no", "scale_1_5"].includes(row.questionType) ? row.questionType : "open_ended",
+          });
+        });
+        setQErrors(errs);
+        if (Object.keys(errs).length) return;
+        const interviewQuestions = filled.map((q, idx) => ({ ...q, displayOrder: idx + 1 }));
+        const payload = { ...form, interviewQuestions };
+        const n = interviewQuestions.length;
+        if (edit === "new") {
+          setLocal((p) => [...p, { ...payload, id: "j-" + Date.now() }]);
+        } else {
+          setLocal((p) => p.map((j) => (j.id === edit ? { ...j, ...payload } : j)));
+        }
+        setToast(`Job saved with ${n} interview question${n === 1 ? "" : "s"}.`);
+        setSaved(true);
+        setTimeout(() => setSaved(false), 2500);
+        setTimeout(() => setToast(""), 4000);
+        setEdit(null);
+        setQErrors({});
+      };
+      const moveRow = (from, to) => {
+        if (to < 0 || to >= questionRows.length) return;
+        setQuestionRows((rows) => {
+          const next = [...rows];
+          const [x] = next.splice(from, 1);
+          next.splice(to, 0, x);
+          return next;
+        });
+      };
+      const nonEmptyCount = questionRows.filter((r) => r.question.trim()).length;
       return (
         <div className="min-h-screen bg-slate-50">
-          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between"><div className="flex items-center gap-3"><button onClick={() => { onSave(local); onBack(); }} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Job Master</span></div><button onClick={() => { onSave(local); setSaved(true); setTimeout(() => setSaved(false), 2000); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold ${saved ? "bg-green-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>{saved ? "✓ Saved" : "Save"}</button></div>
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3"><button type="button" onClick={() => { onSave(local); onBack(); }} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Job Master</span></div>
+            <button type="button" onClick={() => { onSave(local); setSaved(true); setTimeout(() => setSaved(false), 2000); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold ${saved ? "bg-green-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>{saved ? "✓ Saved" : "Save"}</button>
+          </div>
+          {toast ? <div className="bg-teal-600 text-white text-center text-sm py-2 font-semibold">{toast}</div> : null}
           <div className="max-w-4xl mx-auto px-6 py-8">
-            <div className="flex items-center justify-between mb-6"><h1 className="text-2xl font-black text-slate-900">Job Postings</h1><button onClick={() => { setForm({ title: "", designation: "", location: "", description: "", requirements: "" }); setEdit("new"); }} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">+ New</button></div>
+            <div className="flex items-center justify-between mb-6"><h1 className="text-2xl font-black text-slate-900">Job Postings</h1><button type="button" onClick={() => { setForm({ title: "", designation: "", location: "", description: "", requirements: "" }); setQuestionRows(defaultRows()); setQErrors({}); setEdit("new"); }} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">+ New</button></div>
             {edit && (
               <div className="bg-white rounded-2xl border border-indigo-200 shadow-lg p-6 mb-6">
-                <div className="grid grid-cols-2 gap-4 mb-4">{[["title", "Title"], ["designation", "Designation"], ["location", "Location"]].map(([k, l]) => <div key={k}><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><input value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm"/></div>)}</div>
-                {[["description", "Description"], ["requirements", "Requirements"]].map(([k, l]) => <div key={k} className="mb-4"><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><textarea value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none"/></div>)}
-                <div className="flex gap-3"><button onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg">Save</button><button onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
+                <div className="grid grid-cols-2 gap-4 mb-4">{[["title", "Title"], ["designation", "Designation"], ["location", "Location"]].map(([k, l]) => <div key={k}><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><input value={form[k]} onChange={(e) => setForm((p) => ({ ...p, [k]: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"/></div>)}</div>
+                {[["description", "Description"], ["requirements", "Requirements"]].map(([k, l]) => <div key={k} className="mb-4"><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><textarea value={form[k]} onChange={(e) => setForm((p) => ({ ...p, [k]: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none bg-white"/></div>)}
+                <div className="border-t border-slate-200 pt-5 mt-2 mb-4">
+                  <h3 className="text-sm font-black text-slate-800 uppercase tracking-wide mb-1">Interview Questions</h3>
+                  <p className="text-xs text-slate-500 mb-4">These questions will be asked by the AI Voice Bot during candidate screening for this position.</p>
+                  <div className="space-y-2">
+                    {questionRows.map((row, i) => (
+                      <div key={i} className={`flex flex-wrap items-start gap-2 ${qErrors[i] ? "rounded-xl ring-2 ring-red-300 bg-red-50/50 p-2 -mx-2" : ""}`}>
+                        <div className="flex flex-col gap-0.5 pt-2 shrink-0">
+                          <button type="button" disabled={i === 0} onClick={() => moveRow(i, i - 1)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move up">↑</button>
+                          <button type="button" disabled={i >= questionRows.length - 1} onClick={() => moveRow(i, i + 1)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move down">↓</button>
+                        </div>
+                        <span className="text-xs font-bold text-slate-500 pt-3 w-8 shrink-0">Q{i + 1}</span>
+                        <input value={row.question} placeholder="e.g. Walk me through your most recent IVF lab experience" onChange={(e) => { const v = e.target.value; setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, question: v } : r)); setQErrors((e0) => { const n = { ...e0 }; delete n[i]; return n; }); }} className="flex-1 min-w-[200px] px-3 py-2 border border-slate-300 rounded-lg text-sm bg-slate-800 text-white placeholder:text-slate-500"/>
+                        <select value={row.questionType} onChange={(e) => setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, questionType: e.target.value } : r))} className="px-2 py-2 border border-slate-300 rounded-lg text-xs bg-slate-800 text-white shrink-0">
+                          <option value="open_ended">Open-ended</option>
+                          <option value="yes_no">Yes / No</option>
+                          <option value="scale_1_5">Scale 1–5</option>
+                        </select>
+                        <button type="button" disabled={questionRows.length <= 1} onClick={() => questionRows.length > 1 && setQuestionRows((rows) => rows.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-500 disabled:opacity-30 text-lg px-1 shrink-0" aria-label="Remove">✕</button>
+                        {qErrors[i] ? <p className="w-full text-xs text-red-600 font-semibold pl-20">{qErrors[i]}</p> : null}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-center justify-between mt-4 flex-wrap gap-2">
+                    {questionRows.length < MAX_Q ? (
+                      <button type="button" onClick={() => setQuestionRows((rows) => [...rows, { question: "", questionType: "open_ended" }])} className="text-sm font-bold text-indigo-600 hover:text-indigo-800">+ Add Question</button>
+                    ) : (
+                      <span className="text-xs text-amber-700 font-semibold">Maximum 20 questions reached.</span>
+                    )}
+                    <span className="text-xs text-slate-500">Total: {nonEmptyCount} / {MAX_Q} max</span>
+                  </div>
+                </div>
+                <div className="flex gap-3"><button type="button" onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg">Save</button><button type="button" onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
               </div>
             )}
-            <div className="space-y-4">{local.map(j => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p></div><div className="flex gap-2 ml-4 shrink-0"><button onClick={() => { setForm(j); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button onClick={() => setLocal(p => p.filter(x => x.id !== j.id))} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg">Remove</button></div></div>)}</div>
+            <div className="space-y-4">{local.map((j) => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p>{(j.interviewQuestions || []).length > 0 ? <p className="text-xs text-teal-700 font-semibold mt-1">{(j.interviewQuestions || []).filter((q) => q.question && String(q.question).trim().length >= 10).length} interview questions</p> : null}</div><div className="flex gap-2 ml-4 shrink-0"><button type="button" onClick={() => { setForm({ title: j.title, designation: j.designation || "", location: j.location || "", description: j.description || "", requirements: j.requirements || "" }); setQuestionRows(normalizeRowsFromJob(j)); setQErrors({}); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button type="button" onClick={() => setLocal((p) => p.filter((x) => x.id !== j.id))} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg">Remove</button></div></div>)}</div>
           </div>
         </div>
       );
@@ -842,20 +1025,66 @@
       );
     }
 
-    function TalentPoolSubmit({ candidate, onSubmit, onBack, maxCvMb }) {
-      const [form, setForm] = useState({ name: candidate?.name || "", email: candidate?.email || "", phone: "", desiredRoles: "", skills: "", experience: "", location: "", keywords: "" });
-      const [file, setFile] = useState(null), [error, setError] = useState(""), [processing, setProcessing] = useState(false), [ack, setAck] = useState(false), [done, setDone] = useState(false);
+    function TalentPoolSubmit({ candidate, onSubmit, onBack, maxCvMb, coolingMonths }) {
+      const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
+      const todayIso = () => new Date().toISOString().slice(0, 10);
+      const [form, setForm] = useState({
+        name: candidate?.name || "",
+        email: candidate?.email || "",
+        phone: "",
+        desiredRoles: "",
+        skills: "",
+        experience: "",
+        locationCity: "",
+        locationOther: "",
+        keywords: "",
+        qualification: "",
+        currentCtc: "",
+        currentEmployer: "",
+        source: "",
+        applicationDate: todayIso(),
+        coolingPeriod: "",
+      });
+      const [cityList, setCityList] = useState(() => [...INDIAN_CITIES_FALLBACK].sort((a, b) => a.localeCompare(b)));
+      const [file, setFile] = useState(null), [error, setError] = useState(""), [processing, setProcessing] = useState(false), [ack, setAck] = useState(false), [done, setDone] = useState(false), [formErr, setFormErr] = useState("");
       const ref = useRef();
       const mb = typeof maxCvMb === "number" ? maxCvMb : 5;
+      useEffect(() => {
+        fetch("/indian-cities.json")
+          .then((r) => (r.ok ? r.json() : []))
+          .then((arr) => {
+            if (Array.isArray(arr) && arr.length > 0)
+              setCityList([...new Set(arr.map((x) => String(x).trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b)));
+          })
+          .catch(() => {});
+      }, []);
       const handleFile = async (f) => { if (!f) return; setError(""); setProcessing(true); try { setFile(await processResumeFile(f, mb)); } catch (e) { setError(e.message); setFile(null); } finally { setProcessing(false); } };
+      const resolvedLocation = () => {
+        const c = form.locationCity;
+        if (!c) return "";
+        if (c === "__OTHER__") return (form.locationOther || "").trim() || "Other";
+        return c;
+      };
       const submit = () => {
+        setFormErr("");
         if (!form.name.trim() || !form.email.trim() || !file || !ack) return;
+        if (!form.source) { setFormErr("Please select how you heard about us (Source)."); return; }
+        if (!form.locationCity) { setFormErr("Please select your city (or Other)."); return; }
+        if (form.locationCity === "__OTHER__" && !(form.locationOther || "").trim()) { setFormErr("Please type your city when you select Other."); return; }
         onSubmit({
           id: "TP-" + Date.now(), candidateId: candidate?.id || null,
           name: form.name.trim(), email: form.email.trim().toLowerCase(), phone: form.phone.trim(),
           desiredRoles: form.desiredRoles.split(",").map(s => s.trim()).filter(Boolean),
           skills: form.skills.split(",").map(s => s.trim()).filter(Boolean),
-          experience: parseInt(form.experience) || 0, location: form.location.trim(), keywords: form.keywords.trim(),
+          experience: parseInt(form.experience, 10) || 0,
+          location: resolvedLocation(),
+          qualification: form.qualification.trim(),
+          currentCtc: form.currentCtc.trim(),
+          currentEmployer: form.currentEmployer.trim(),
+          source: form.source,
+          applicationDate: form.applicationDate || todayIso(),
+          coolingPeriod: form.coolingPeriod.trim(),
+          keywords: form.keywords.trim(),
           cvText: file.cvText, cvFile: file, submittedAt: new Date().toISOString(), mappedToJobs: []
         });
         setDone(true);
@@ -875,8 +1104,35 @@
             <h1 className="text-3xl font-black text-slate-900 mb-1">Submit to Talent Pool</h1>
             <p className="text-slate-500 mb-5">No active role matches? Share your profile.</p>
             <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-5 text-xs text-indigo-700"><p className="font-bold mb-1">📋 About the Talent Pool</p><p>Your CV is stored independently. HR SPOCs will contact you. All access is logged (§5, §6, §8 DPDPA).</p></div>
+            {formErr ? <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2">{formErr}</div> : null}
             <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
-              {[["Full Name *", "name", "text"], ["Email *", "email", "email"], ["Phone", "phone", "tel"], ["Location", "location", "text"]].map(([l, k, t]) => <div key={k}><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{l}</label><input type={t} value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"/></div>)}
+              {[["Full Name *", "name", "text"], ["Email *", "email", "email"], ["Phone", "phone", "tel"]].map(([l, k, t]) => <div key={k}><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{l}</label><input type={t} value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"/></div>)}
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">City (India) *</label>
+                <select value={form.locationCity} onChange={e => setForm(p => ({ ...p, locationCity: e.target.value, locationOther: e.target.value === "__OTHER__" ? p.locationOther : "" }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400 bg-white">
+                  <option value="">— Select city —</option>
+                  {cityList.map((city) => <option key={city} value={city}>{city}</option>)}
+                  <option value="__OTHER__">Other (type below)</option>
+                </select>
+                {form.locationCity === "__OTHER__" ? (
+                  <input type="text" value={form.locationOther} onChange={e => setForm(p => ({ ...p, locationOther: e.target.value }))} placeholder="Type your city" className="w-full mt-2 px-4 py-2.5 border border-indigo-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400" />
+                ) : null}
+              </div>
+              <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Qualification</label><input value={form.qualification} onChange={e => setForm(p => ({ ...p, qualification: e.target.value }))} placeholder="e.g. MBBS, MBA, B.Tech" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current CTC</label><input value={form.currentCtc} onChange={e => setForm(p => ({ ...p, currentCtc: e.target.value }))} placeholder="e.g. 12 LPA" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current employer</label><input value={form.currentEmployer} onChange={e => setForm(p => ({ ...p, currentEmployer: e.target.value }))} placeholder="Company name" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Source *</label>
+                <select value={form.source} onChange={e => setForm(p => ({ ...p, source: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm bg-white focus:outline-none focus:border-indigo-400">
+                  {TP_SOURCE_OPTIONS.map((o) => <option key={o.value || "blank"} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Date of application</label><input type="date" value={form.applicationDate} onChange={e => setForm(p => ({ ...p, applicationDate: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Cooling period</label><input value={form.coolingPeriod} onChange={e => setForm(p => ({ ...p, coolingPeriod: e.target.value }))} placeholder={`e.g. ${cm} months (org policy) or eligible after…`} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+              </div>
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Years of Experience</label><input type="number" min="0" value={form.experience} onChange={e => setForm(p => ({ ...p, experience: e.target.value }))} placeholder="0" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Desired Roles <span className="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input value={form.desiredRoles} onChange={e => setForm(p => ({ ...p, desiredRoles: e.target.value }))} placeholder="e.g. Senior Embryologist" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Skills <span className="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input value={form.skills} onChange={e => setForm(p => ({ ...p, skills: e.target.value }))} placeholder="ICSI, Vitrification" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
@@ -1010,7 +1266,7 @@
 
     function TalentPoolBrowse({ talentPool, jobs, candidates, onMapToJob, onLogAudit, onBack, coolingMonths }) {
       const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
-      const [filters, setFilters] = useState({ role: "", skill: "", minExp: "", maxExp: "", location: "", keyword: "", fromDate: "", toDate: "" });
+      const [filters, setFilters] = useState({ role: "", skill: "", minExp: "", maxExp: "", location: "", source: "", keyword: "", fromDate: "", toDate: "" });
       const [selected, setSelected] = useState(null), [mapJobId, setMapJobId] = useState(""), [mapping, setMapping] = useState(false);
       const [resumePreview, setResumePreview] = useState(null);
       const filtered = talentPool.filter(t => {
@@ -1019,7 +1275,11 @@
         if (filters.minExp !== "" && (t.experience || 0) < parseInt(filters.minExp)) return false;
         if (filters.maxExp !== "" && (t.experience || 0) > parseInt(filters.maxExp)) return false;
         if (filters.location && !(t.location || "").toLowerCase().includes(filters.location.toLowerCase())) return false;
-        if (filters.keyword) { const all = `${t.name} ${t.email} ${t.keywords} ${t.cvText} ${(t.skills || []).join(" ")} ${(t.desiredRoles || []).join(" ")}`.toLowerCase(); if (!all.includes(filters.keyword.toLowerCase())) return false; }
+        if (filters.source && (t.source || "") !== filters.source) return false;
+        if (filters.keyword) {
+          const all = `${t.name} ${t.email} ${t.keywords} ${t.cvText} ${t.qualification || ""} ${t.currentCtc || ""} ${t.currentEmployer || ""} ${t.source || ""} ${t.coolingPeriod || ""} ${t.applicationDate || ""} ${(t.skills || []).join(" ")} ${(t.desiredRoles || []).join(" ")}`.toLowerCase();
+          if (!all.includes(filters.keyword.toLowerCase())) return false;
+        }
         if (filters.fromDate && new Date(t.submittedAt) < new Date(filters.fromDate)) return false;
         if (filters.toDate && new Date(t.submittedAt) > new Date(filters.toDate + "T23:59:59")) return false;
         return true;
@@ -1073,6 +1333,12 @@
                   {selected.location && <div><p className="text-xs text-slate-400 font-bold">Location</p><p>{selected.location}</p></div>}
                   <div><p className="text-xs text-slate-400 font-bold">Experience</p><p>{selected.experience} yrs</p></div>
                   <div><p className="text-xs text-slate-400 font-bold">Submitted</p><p>{fmtDate(selected.submittedAt)}</p></div>
+                  {selected.qualification && <div><p className="text-xs text-slate-400 font-bold">Qualification</p><p>{selected.qualification}</p></div>}
+                  {selected.currentCtc && <div><p className="text-xs text-slate-400 font-bold">Current CTC</p><p>{selected.currentCtc}</p></div>}
+                  {selected.currentEmployer && <div className="col-span-2"><p className="text-xs text-slate-400 font-bold">Current employer</p><p>{selected.currentEmployer}</p></div>}
+                  {selected.source && <div><p className="text-xs text-slate-400 font-bold">Source</p><p>{selected.source}</p></div>}
+                  {selected.applicationDate && <div><p className="text-xs text-slate-400 font-bold">Application date</p><p>{selected.applicationDate}</p></div>}
+                  {selected.coolingPeriod && <div className="col-span-2"><p className="text-xs text-slate-400 font-bold">Cooling period</p><p>{selected.coolingPeriod}</p></div>}
                 </div>
                 {selected.desiredRoles?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Desired Roles</p><div className="flex gap-1 flex-wrap">{selected.desiredRoles.map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg">{r}</span>)}</div></div>}
                 {selected.skills?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Skills</p><div className="flex gap-1 flex-wrap">{selected.skills.map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-lg">{s}</span>)}</div></div>}
@@ -1105,15 +1371,16 @@
               <h2 className="text-xs font-black text-slate-400 uppercase mb-3">🔍 Filters</h2>
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
                 {[["Role", "role", "text", "Embryologist"], ["Skill", "skill", "text", "ICSI"], ["Location", "location", "text", "Mumbai"], ["Keyword", "keyword", "text", "Free text"], ["Min Exp", "minExp", "number", ""], ["Max Exp", "maxExp", "number", ""], ["From Date", "fromDate", "date", ""], ["To Date", "toDate", "date", ""]].map(([l, k, t, p]) => <div key={k}><label className="block text-xs text-slate-500 mb-1">{l}</label><input type={t} value={filters[k]} onChange={e => setFilters(prev => ({ ...prev, [k]: e.target.value }))} placeholder={p} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-indigo-400"/></div>)}
+                <div><label className="block text-xs text-slate-500 mb-1">Source</label><select value={filters.source} onChange={e => setFilters(prev => ({ ...prev, source: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white focus:outline-none focus:border-indigo-400"><option value="">All</option>{TP_SOURCE_OPTIONS.filter(o => o.value).map(o => <option key={o.value} value={o.value}>{o.label}</option>)}</select></div>
               </div>
-              {hasFilters && <button onClick={() => setFilters({ role: "", skill: "", minExp: "", maxExp: "", location: "", keyword: "", fromDate: "", toDate: "" })} className="mt-3 text-xs text-indigo-500 font-bold">Clear all ✕</button>}
+              {hasFilters && <button onClick={() => setFilters({ role: "", skill: "", minExp: "", maxExp: "", location: "", source: "", keyword: "", fromDate: "", toDate: "" })} className="mt-3 text-xs text-indigo-500 font-bold">Clear all ✕</button>}
             </div>
             <p className="text-sm font-bold text-slate-600 mb-3">{filtered.length} {filtered.length === 1 ? "profile" : "profiles"}</p>
             {filtered.length === 0 ? <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 py-16 text-center"><p className="text-slate-400">{talentPool.length === 0 ? "Talent pool is empty." : "No profiles match."}</p></div> : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{filtered.map(t => (
                 <div key={t.id} className="bg-white rounded-2xl border border-slate-200 p-5 hover:shadow-lg hover:border-indigo-200 transition-all">
                   <div className="flex items-start justify-between mb-3"><div className="flex items-center gap-3"><div className="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-black text-lg">{t.name[0]}</div><div><p className="font-bold text-slate-900">{t.name}</p><p className="text-xs text-slate-400">{t.email}</p></div></div><span className="text-xs font-bold text-slate-500 bg-slate-50 px-2 py-1 rounded-lg">{fmtDate(t.submittedAt)}</span></div>
-                  <div className="flex gap-3 text-xs text-slate-600 mb-3 flex-wrap">{t.location && <p>📍 {t.location}</p>}<p>💼 {t.experience} yrs</p><p>{fileIcon(t.cvFile.ext)} {t.cvFile.ext.toUpperCase()}</p></div>
+                  <div className="flex gap-3 text-xs text-slate-600 mb-3 flex-wrap">{t.location && <p>📍 {t.location}</p>}{t.source ? <p className="text-indigo-700 font-semibold">{TP_SOURCE_OPTIONS.find(o => o.value === t.source)?.label || t.source}</p> : null}<p>💼 {t.experience} yrs</p><p>{fileIcon(t.cvFile.ext)} {t.cvFile.ext.toUpperCase()}</p></div>
                   {t.desiredRoles?.length > 0 && <div className="flex gap-1 flex-wrap mb-2">{t.desiredRoles.slice(0, 3).map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-lg">{r}</span>)}</div>}
                   {t.skills?.length > 0 && <div className="flex gap-1 flex-wrap mb-3">{t.skills.slice(0, 4).map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded-lg">{s}</span>)}</div>}
                   <div className="flex gap-2 pt-3 border-t border-slate-100">
@@ -1485,12 +1752,33 @@
       );
     }
 
-    function Interview({ context, onEnd }) {
-      const [msgs, setMsgs] = useState([]), [busy, setBusy] = useState(false), [listening, setListening] = useState(false), [speaking, setSpeaking] = useState(false), [transcript, setTranscript] = useState(""), [qCount, setQCount] = useState(0), [hist, setHist] = useState([]), [ended, setEnded] = useState(false), [supported, setSupported] = useState(true), [micError, setMicError] = useState(""), [showText, setShowText] = useState(false), [textInput, setTextInput] = useState(""), [voices, setVoices] = useState([]);
-      const recRef = useRef(null), txRef = useRef(""), MAX = 6;
+    function Interview({ context, applicationId, onEnd }) {
+      const MAX_AI = 5;
+      const RESOLVE_TIMEOUT_MS = 90000;
+      const [phase, setPhase] = useState("load");
+      const [script, setScript] = useState(null);
+      const [hrIdx, setHrIdx] = useState(0);
+      const hrPayloadRef = useRef([]);
+      const [msgs, setMsgs] = useState([]);
+      const [busy, setBusy] = useState(false);
+      const [listening, setListening] = useState(false);
+      const [speaking, setSpeaking] = useState(false);
+      const [transcript, setTranscript] = useState("");
+      const [aiQCount, setAiQCount] = useState(0);
+      const [hist, setHist] = useState([]);
+      const [ended, setEnded] = useState(false);
+      const [supported, setSupported] = useState(true);
+      const [micError, setMicError] = useState("");
+      const [showText, setShowText] = useState(false);
+      const [textInput, setTextInput] = useState("");
+      const [voices, setVoices] = useState([]);
+      const recRef = useRef(null);
+      const txRef = useRef("");
+      const aiBootRef = useRef(false);
+      const hrIntroDoneRef = useRef(false);
       const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
       const langCode = langMap[context.language] || "en-IN";
-      const sys = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX} questions, end with [INTERVIEW_COMPLETE].`;
+      const sysAi = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX_AI} questions, end with [INTERVIEW_COMPLETE].`;
       useEffect(() => { const load = () => setVoices(window.speechSynthesis?.getVoices?.() || []); load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
       useEffect(() => {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1503,12 +1791,12 @@
         recRef.current = rec;
         return () => { try { rec.abort(); } catch {} };
       }, [langCode]);
-      const speak = (text) => new Promise(resolve => {
+      const speak = (text) => new Promise((resolve) => {
         if (!text || !window.speechSynthesis) { resolve(); return; }
         window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
         u.lang = langCode; u.rate = 0.95;
-        const v = voices.find(v => v.lang === langCode) || voices.find(v => v.lang.startsWith(langCode.split("-")[0]));
+        const v = voices.find((vo) => vo.lang === langCode) || voices.find((vo) => vo.lang.startsWith(langCode.split("-")[0]));
         if (v) u.voice = v;
         u.onstart = () => setSpeaking(true);
         u.onend = () => { setSpeaking(false); resolve(); };
@@ -1516,47 +1804,158 @@
         window.speechSynthesis.speak(u);
       });
       useEffect(() => {
+        if (!applicationId) {
+          setPhase("load");
+          setScript(null);
+          return;
+        }
+        let cancelled = false;
+        setPhase("load");
+        fetch(`/api/voice-bot/interview-script/${applicationId}`, { headers: { ...authHeaders() } })
+          .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
+          .then((d) => { if (!cancelled) { setScript(d); setPhase("hr"); } })
+          .catch(() => { if (!cancelled) setPhase("err"); });
+        return () => { cancelled = true; };
+      }, [applicationId]);
+      useEffect(() => {
+        if (applicationId) return;
+        const t = setTimeout(() => {
+          setPhase((prev) => (prev === "load" ? "err" : prev));
+        }, RESOLVE_TIMEOUT_MS);
+        return () => clearTimeout(t);
+      }, [applicationId]);
+      useEffect(() => {
+        if (phase !== "hr" || !script?.questions?.length || hrIntroDoneRef.current) return;
+        hrIntroDoneRef.current = true;
         let cancelled = false;
         (async () => {
-          await new Promise(r => setTimeout(r, 400));
+          await new Promise((r) => setTimeout(r, 400));
+          if (cancelled) return;
+          const q0 = script.questions[0];
+          setMsgs([{ role: "ai", text: q0.question, tag: "hr" }]);
+          await speak(q0.question);
+        })();
+        return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
+      }, [phase, script]);
+      useEffect(() => {
+        if (phase !== "ai" || aiBootRef.current) return;
+        aiBootRef.current = true;
+        let cancelled = false;
+        (async () => {
+          await new Promise((r) => setTimeout(r, 300));
           if (cancelled) return;
           setBusy(true);
-          const r = await callClaude([{ role: "user", content: "Start." }], sys);
+          const r0 = await callClaude([{ role: "user", content: "Start." }], sysAi);
           if (cancelled) return;
-          const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
-          setMsgs([{ role: "ai", text: clean }]);
-          setHist([{ role: "user", content: "Start." }, { role: "assistant", content: r }]);
+          const clean = r0.replace("[INTERVIEW_COMPLETE]", "").trim();
+          setMsgs((p) => [...p, { role: "ai", text: clean, tag: "ai" }]);
+          setHist([{ role: "user", content: "Start." }, { role: "assistant", content: r0 }]);
           setBusy(false);
           await speak(clean);
         })();
-        return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
-      }, []);
-      const startListening = () => { if (!recRef.current || busy || ended) return; if (window.speechSynthesis) window.speechSynthesis.cancel(); setSpeaking(false); setTranscript(""); txRef.current = ""; setMicError(""); setListening(true); try { recRef.current.start(); } catch { setListening(false); } };
-      const stopAndSend = () => { if (recRef.current) { try { recRef.current.stop(); } catch {} } setListening(false); const a = (txRef.current || transcript).trim(); if (a) setTimeout(() => sendAnswer(a), 200); else setMicError("No speech."); };
-      const sendAnswer = async (text) => {
+        return () => { cancelled = true; };
+      }, [phase]);
+      const startListening = () => {
+        if (!recRef.current || busy || ended) return;
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        setSpeaking(false); setTranscript(""); txRef.current = ""; setMicError(""); setListening(true);
+        try { recRef.current.start(); } catch { setListening(false); }
+      };
+      const stopAndSend = () => {
+        if (recRef.current) { try { recRef.current.stop(); } catch {} }
+        setListening(false);
+        const a = (txRef.current || transcript).trim();
+        if (a) setTimeout(() => dispatchAnswer(a), 200);
+        else setMicError("No speech.");
+      };
+      const dispatchAnswer = async (text) => {
         const answer = (text || "").trim();
         if (!answer || busy || ended) return;
         setTranscript(""); txRef.current = ""; setTextInput(""); setMicError("");
-        const h = [...hist, { role: "user", content: answer }];
-        setMsgs(p => [...p, { role: "user", text: answer }]);
-        setBusy(true);
-        const r = await callClaude(h, sys);
-        const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
-        const isLast = r.includes("[INTERVIEW_COMPLETE]") || qCount + 1 >= MAX;
-        setHist([...h, { role: "assistant", content: r }]);
-        setMsgs(p => [...p, { role: "ai", text: clean }]);
-        setQCount(c => c + 1);
-        setBusy(false);
-        await speak(clean);
-        if (isLast) { setEnded(true); setTimeout(() => onEnd([...msgs, { role: "user", text: answer }, { role: "ai", text: clean }]), 600); }
+        if (phase === "hr" && script?.questions?.length) {
+          const cur = script.questions[hrIdx];
+          setMsgs((p) => [...p, { role: "user", text: answer, tag: "hr" }]);
+          hrPayloadRef.current.push({
+            questionId: cur.id > 0 ? cur.id : null,
+            questionText: cur.question,
+            answerText: answer,
+            audioUrl: null,
+            durationSeconds: null,
+          });
+          const nextIdx = hrIdx + 1;
+          if (nextIdx < script.questions.length) {
+            setHrIdx(nextIdx);
+            setBusy(true);
+            const nq = script.questions[nextIdx];
+            setMsgs((p) => [...p, { role: "ai", text: nq.question, tag: "hr" }]);
+            setBusy(false);
+            await speak(nq.question);
+          } else {
+            setBusy(true);
+            try {
+              await fetch("/api/voice-bot/interview-answers", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...authHeaders() },
+                body: JSON.stringify({ applicationId, answers: hrPayloadRef.current }),
+              });
+            } catch (e) { console.error(e); }
+            setBusy(false);
+            setPhase("ai");
+          }
+          return;
+        }
+        if (phase === "ai") {
+          const h = [...hist, { role: "user", content: answer }];
+          setBusy(true);
+          const r = await callClaude(h, sysAi);
+          const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
+          const isLast = r.includes("[INTERVIEW_COMPLETE]") || aiQCount + 1 >= MAX_AI;
+          setHist([...h, { role: "assistant", content: r }]);
+          setAiQCount((c) => c + 1);
+          setBusy(false);
+          let transcriptOut = null;
+          setMsgs((p) => {
+            const next = [...p, { role: "user", text: answer, tag: "ai" }, { role: "ai", text: clean, tag: "ai" }];
+            transcriptOut = next.map((m) => ({ role: m.role, text: m.text }));
+            return next;
+          });
+          await speak(clean);
+          if (isLast && transcriptOut) {
+            setEnded(true);
+            setTimeout(() => onEnd(transcriptOut), 450);
+          }
+        }
       };
-      const endInterview = () => { if (window.speechSynthesis) window.speechSynthesis.cancel(); if (recRef.current) { try { recRef.current.abort(); } catch {} } onEnd(msgs); };
-      const lastAI = [...msgs].reverse().find(m => m.role === "ai");
+      const sendAnswer = (text) => dispatchAnswer(text);
+      const endInterview = () => {
+        if (window.speechSynthesis) window.speechSynthesis.cancel();
+        if (recRef.current) { try { recRef.current.abort(); } catch {} }
+        onEnd(msgs);
+      };
+      const lastQ = [...msgs].reverse().find((m) => m.role === "ai");
+      const hrTotal = script?.questions?.length || 0;
+      const phaseLabel = phase === "hr" ? `Role-specific · ${Math.min(hrIdx + 1, hrTotal)}/${hrTotal || "—"}` : phase === "ai" ? `Follow-up · ${aiQCount}/${MAX_AI}` : "";
+      if (phase === "load") {
+        return (
+          <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-8">
+            <div className="w-10 h-10 border-4 border-indigo-800 border-t-indigo-400 rounded-full animate-spin mb-4"/>
+            <p className="text-slate-400 text-sm">{!applicationId ? "Resolving application…" : "Loading interview script…"}</p>
+          </div>
+        );
+      }
+      if (phase === "err") {
+        return (
+          <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-8 text-center">
+            <p className="text-red-300 mb-4 text-sm">Could not start interview (missing application or script).</p>
+            <button type="button" onClick={() => onEnd([])} className="px-5 py-2 bg-slate-700 text-white rounded-xl text-sm font-bold">Exit</button>
+          </div>
+        );
+      }
       return (
         <div className="min-h-screen bg-slate-950 flex flex-col">
           <div className="bg-slate-900 border-b border-slate-800 px-6 py-4 flex items-center justify-between">
-            <div className="flex items-center gap-3"><div className={`w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center font-black text-white ${speaking ? "animate-pulse" : ""}`}>S</div><div><p className="font-bold text-white text-sm">Swar Voice Interview</p><p className="text-xs text-indigo-300">{context.language} · {qCount}/{MAX}</p></div></div>
-            <button onClick={endInterview} className="px-3 py-1.5 bg-red-900/40 text-red-300 rounded-lg text-xs font-bold border border-red-800/50">End</button>
+            <div className="flex items-center gap-3"><div className={`w-10 h-10 bg-indigo-600 rounded-full flex items-center justify-center font-black text-white ${speaking ? "animate-pulse" : ""}`}>S</div><div><p className="font-bold text-white text-sm">Swar Voice Interview</p><p className="text-xs text-indigo-300">{context.language} · {phaseLabel}</p></div></div>
+            <button type="button" onClick={endInterview} className="px-3 py-1.5 bg-red-900/40 text-red-300 rounded-lg text-xs font-bold border border-red-800/50">End</button>
           </div>
           <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 max-w-3xl mx-auto w-full">
             <div className="mb-6 relative">
@@ -1572,20 +1971,20 @@
               {ended && <p className="text-green-300 text-sm">✓ Complete</p>}
               {micError && <p className="text-amber-400 text-xs mt-1">{micError}</p>}
             </div>
-            {lastAI && <div className="max-w-xl w-full bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-4 text-center"><p className="text-xs uppercase font-black text-indigo-400 mb-2">Question</p><p className="text-white text-base">{lastAI.text}</p></div>}
+            {lastQ && <div className="max-w-xl w-full bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-4 text-center"><p className="text-xs uppercase font-black text-indigo-400 mb-2">Question</p><p className="text-white text-base">{lastQ.text}</p></div>}
             {(transcript || listening) && <div className="max-w-xl w-full bg-red-900/20 border border-red-800/50 rounded-2xl p-4 mb-4"><p className="text-xs uppercase font-black text-red-300 mb-1">Your answer</p><p className="text-white">{transcript || <span className="text-slate-500 italic">Speak now…</span>}</p></div>}
             {!ended && supported && (
               <div className="flex flex-col items-center gap-3 my-4">
-                {!listening ? <button onClick={startListening} disabled={busy || speaking} className="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white shadow-2xl flex items-center justify-center text-3xl">🎤</button> : <button onClick={stopAndSend} className="w-20 h-20 rounded-full bg-red-600 text-white shadow-2xl flex items-center justify-center text-3xl animate-pulse">⏹</button>}
+                {!listening ? <button type="button" onClick={startListening} disabled={busy || speaking} className="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white shadow-2xl flex items-center justify-center text-3xl">🎤</button> : <button type="button" onClick={stopAndSend} className="w-20 h-20 rounded-full bg-red-600 text-white shadow-2xl flex items-center justify-center text-3xl animate-pulse">⏹</button>}
               </div>
             )}
             {showText && !ended && (
               <div className="max-w-xl w-full mt-4 flex gap-2">
-                <input value={textInput} onChange={e => setTextInput(e.target.value)} onKeyDown={e => e.key === "Enter" && sendAnswer(textInput)} placeholder="Type answer…" disabled={busy} className="flex-1 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white text-sm"/>
-                <button onClick={() => sendAnswer(textInput)} disabled={!textInput.trim() || busy} className="px-5 py-3 bg-indigo-600 text-white font-bold rounded-xl text-sm disabled:bg-slate-700">Send</button>
+                <input value={textInput} onChange={(e) => setTextInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && sendAnswer(textInput)} placeholder="Type answer…" disabled={busy} className="flex-1 px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white text-sm"/>
+                <button type="button" onClick={() => sendAnswer(textInput)} disabled={!textInput.trim() || busy} className="px-5 py-3 bg-indigo-600 text-white font-bold rounded-xl text-sm disabled:bg-slate-700">Send</button>
               </div>
             )}
-            {supported && !showText && !ended && <button onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>}
+            {supported && !showText && !ended && <button type="button" onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>}
             {!supported && <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-center text-amber-200 text-sm max-w-md">⚠ Browser doesn't support voice. Use text.</div>}
           </div>
         </div>
@@ -1890,6 +2289,27 @@
 
       const active = candidates.find(c => c.id === activeId);
       const upd = u => setCandidates(p => p.map(c => c.id === activeId ? { ...c, ...u } : c));
+      const ivJid = step === "INTERVIEW" && active ? (selJob?.id || active?.jobId) : null;
+      const latestAppIV = ivJid ? getLatestAppForJob(active?.applicationHistory, ivJid) : null;
+      const [resolvedApplicationId, setResolvedApplicationId] = useState(null);
+      useEffect(() => {
+        if (step !== "INTERVIEW" || !active || !ivJid) {
+          setResolvedApplicationId(null);
+          return;
+        }
+        if (latestAppIV?.applicationId != null) {
+          setResolvedApplicationId(latestAppIV.applicationId);
+          return;
+        }
+        let cancelled = false;
+        fetch(`/api/me/application-for-job/${encodeURIComponent(ivJid)}`, { headers: { ...authHeaders() } })
+          .then((r) => (r.ok ? r.json() : {}))
+          .then((d) => {
+            if (!cancelled && d.applicationId != null) setResolvedApplicationId(d.applicationId);
+          })
+          .catch(() => {});
+        return () => { cancelled = true; };
+      }, [step, active, ivJid, latestAppIV?.applicationId]);
       const company = meta?.companyName || "Indira IVF";
       const jd = selJob ? { ...selJob, companyName: company } : { id: "default", title: "Open Role", description: "", companyName: company };
       const cmCooling = meta?.coolingMonths ?? 3;
@@ -1965,7 +2385,7 @@
         handleApplyToJob(job);
       };
 
-      const handleCVUploaded = (file) => {
+      const handleCVUploaded = async (file) => {
         if (!file || !active || !selJob) return;
         const newApp = {
           jobId: selJob.id,
@@ -1975,6 +2395,10 @@
         };
         upd({ cv: file.cvText, cvFile: file, status: "APPLIED", jobId: selJob.id, applicationHistory: [...(active.applicationHistory || []), newApp] });
         setStep("INTRO");
+        try {
+          await new Promise((r) => setTimeout(r, 900));
+          await syncStateFromServer();
+        } catch (e) {}
       };
       const handleTalentPoolMap = (entry, jobId) => {
         const existing = candidates.find(c => c.email.toLowerCase() === entry.email.toLowerCase());
@@ -2164,7 +2588,7 @@
           )}
           {step === "ANALYSIS" && active?.transcript && <Analysis context={{ jd, candidateName: active.name, language: active.lang || "English" }} transcript={active.transcript} onDecision={(s, r, a) => { upd({ status: s, remarks: r, analysis: a }); setStep("HR"); }} onBack={() => setStep("HR")} onLogout={logout}/>}
           {step === "CVUP" && selJob && <CVUpload jobTitle={selJob.title} maxCvMb={maxCvMb} onComplete={handleCVUploaded} onBack={() => { navigate("/"); setStep("HOME"); setSelJob(null); }}/>}
-          {step === "TP_SUBMIT" && <TalentPoolSubmit candidate={active} maxCvMb={maxCvMb} onSubmit={(entry) => setTalentPool(p => [...p, entry])} onBack={() => {
+          {step === "TP_SUBMIT" && <TalentPoolSubmit candidate={active} maxCvMb={maxCvMb} coolingMonths={cmCooling} onSubmit={(entry) => setTalentPool(p => [...p, entry])} onBack={() => {
             if (tpFromPortal) { navigate("/portal"); setStep("PORTAL"); }
             else { navigate("/"); setStep("HOME"); }
           }}/>}
@@ -2191,7 +2615,7 @@
               }}
             />
           )}
-          {step === "INTERVIEW" && active && <Interview context={{ jd, candidateName: active.name, language: active.lang || "English" }} onEnd={t => {
+          {step === "INTERVIEW" && active && <Interview context={{ jd, candidateName: active.name, language: active.lang || "English" }} applicationId={resolvedApplicationId} onEnd={t => {
             const jid = selJob?.id || active?.jobId;
             let nextHist = active.applicationHistory;
             if (jid) nextHist = patchLatestApp(active.applicationHistory, jid, { interviewCompletedAt: new Date().toISOString() });

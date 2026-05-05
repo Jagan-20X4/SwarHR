@@ -139,7 +139,13 @@ CREATE TABLE talent_pool_entry (
   keywords TEXT,
   cv_text TEXT,
   submitted_at TIMESTAMPTZ NOT NULL,
-  consent_acknowledged BOOLEAN NOT NULL DEFAULT FALSE
+  consent_acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
+  qualification VARCHAR(500),
+  current_ctc VARCHAR(64),
+  current_employer VARCHAR(255),
+  source VARCHAR(128),
+  application_date DATE,
+  cooling_period VARCHAR(255)
 );
 
 CREATE TABLE talent_pool_desired_role (

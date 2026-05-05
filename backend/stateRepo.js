@@ -51,10 +51,39 @@ async function loadMeta(client) {
   };
 }
 
+async function loadJobInterviewQuestions(client, jobIds) {
+  if (!jobIds.length) return new Map();
+  const r = await client.query(
+    `SELECT id, job_id, question, question_type, display_order
+     FROM job_interview_questions WHERE job_id = ANY($1::varchar[])
+     ORDER BY job_id, display_order`,
+    [jobIds],
+  );
+  const m = new Map();
+  for (const row of r.rows) {
+    const id = row.job_id;
+    if (!m.has(id)) m.set(id, []);
+    m.get(id).push({
+      id: row.id,
+      question: row.question,
+      questionType: row.question_type,
+      displayOrder: row.display_order,
+    });
+  }
+  return m;
+}
+
 async function loadJobs(client) {
   const r = await client.query(
     "SELECT id, title, designation, location, description, requirements FROM job ORDER BY id",
   );
+  const ids = r.rows.map((x) => x.id);
+  let qMap = new Map();
+  try {
+    qMap = await loadJobInterviewQuestions(client, ids);
+  } catch (_e) {
+    /* migration not applied yet */
+  }
   return r.rows.map((j) => ({
     id: j.id,
     title: j.title,
@@ -62,6 +91,7 @@ async function loadJobs(client) {
     location: j.location || "",
     description: j.description || "",
     requirements: j.requirements || "",
+    interviewQuestions: qMap.get(j.id) || [],
   }));
 }
 
@@ -94,7 +124,7 @@ async function loadOneCandidate(client, id) {
         [id],
       ),
       client.query(
-        "SELECT job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
+        "SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
         [id],
       ),
       client.query(
@@ -172,6 +202,7 @@ async function loadOneCandidate(client, id) {
     fromTalentPool: b.from_talent_pool,
     purposes: purposes.rows.map((r) => r.purpose_code),
     applicationHistory: apps.rows.map((r) => ({
+      applicationId: Number(r.id),
       jobId: r.job_id,
       appliedAt: new Date(r.applied_at).toISOString(),
       interviewScheduledAt: r.interview_scheduled_at
@@ -189,9 +220,20 @@ async function loadOneCandidate(client, id) {
 }
 
 async function loadTalentPool(client) {
-  const entries = await client.query(
-    "SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged FROM talent_pool_entry ORDER BY submitted_at DESC",
-  );
+  let entries;
+  try {
+    entries = await client.query(
+      `SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+              qualification, current_ctc, current_employer, source, application_date, cooling_period
+       FROM talent_pool_entry ORDER BY submitted_at DESC`,
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      entries = await client.query(
+        "SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged FROM talent_pool_entry ORDER BY submitted_at DESC",
+      );
+    } else throw e;
+  }
   const out = [];
   for (const e of entries.rows) {
     const [roles, skills, cvf, maps] = await Promise.all([
@@ -233,6 +275,15 @@ async function loadTalentPool(client) {
       experience: e.experience_years ?? 0,
       location: e.location || "",
       keywords: e.keywords || "",
+      qualification: e.qualification != null ? String(e.qualification) : "",
+      currentCtc: e.current_ctc != null ? String(e.current_ctc) : "",
+      currentEmployer: e.current_employer != null ? String(e.current_employer) : "",
+      source: e.source != null ? String(e.source) : "",
+      applicationDate:
+        e.application_date != null
+          ? new Date(e.application_date).toISOString().slice(0, 10)
+          : "",
+      coolingPeriod: e.cooling_period != null ? String(e.cooling_period) : "",
       cvText: e.cv_text || "",
       submittedAt: new Date(e.submitted_at).toISOString(),
       cvFile,
@@ -302,6 +353,8 @@ async function saveAppState(pool, body) {
         talent_pool_cv_file,
         talent_pool_entry,
         transcript_line,
+        interview_answers,
+        application_stage_history,
         application,
         candidate_purpose,
         grievance,
@@ -310,6 +363,7 @@ async function saveAppState(pool, body) {
         analysis_improvement_area,
         cv_attachment,
         candidate,
+        job_interview_questions,
         job
       RESTART IDENTITY CASCADE
     `);
@@ -327,6 +381,23 @@ async function saveAppState(pool, body) {
           j.requirements || "",
         ],
       );
+      const rows = (j.interviewQuestions || [])
+        .map((q, idx) => ({
+          text: String(q.question || "").trim(),
+          type: ["open_ended", "yes_no", "scale_1_5"].includes(q.questionType)
+            ? q.questionType
+            : "open_ended",
+          ord: idx + 1,
+        }))
+        .filter((q) => q.text.length >= 10 && q.text.length <= 500);
+      let ord = 1;
+      for (const q of rows) {
+        await client.query(
+          `INSERT INTO job_interview_questions (job_id, question, question_type, display_order)
+           VALUES ($1,$2,$3,$4)`,
+          [j.id, q.text, q.type, ord++],
+        );
+      }
     }
 
     for (const c of candidates) {
@@ -443,23 +514,57 @@ async function saveAppState(pool, body) {
     }
 
     for (const t of talentPool) {
-      await client.query(
-        `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [
-          t.id,
-          t.candidateId || null,
-          t.name,
-          t.email,
-          t.phone || "",
-          t.experience ?? 0,
-          t.location || "",
-          t.keywords || "",
-          t.cvText || "",
-          new Date(t.submittedAt),
-          true,
-        ],
-      );
+      const appDate =
+        t.applicationDate != null && String(t.applicationDate).trim() !== ""
+          ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
+          : null;
+      try {
+        await client.query(
+          `INSERT INTO talent_pool_entry (
+             id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+             qualification, current_ctc, current_employer, source, application_date, cooling_period
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          [
+            t.id,
+            t.candidateId || null,
+            t.name,
+            t.email,
+            t.phone || "",
+            t.experience ?? 0,
+            t.location || "",
+            t.keywords || "",
+            t.cvText || "",
+            new Date(t.submittedAt),
+            true,
+            t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+            t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+            t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+            t.source != null ? String(t.source).slice(0, 128) : null,
+            appDate,
+            t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+          ],
+        );
+      } catch (e) {
+        if (e.code === "42703") {
+          await client.query(
+            `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [
+              t.id,
+              t.candidateId || null,
+              t.name,
+              t.email,
+              t.phone || "",
+              t.experience ?? 0,
+              t.location || "",
+              t.keywords || "",
+              t.cvText || "",
+              new Date(t.submittedAt),
+              true,
+            ],
+          );
+        } else throw e;
+      }
       for (const dr of t.desiredRoles || []) {
         await client.query(
           "INSERT INTO talent_pool_desired_role (talent_pool_id, role_name) VALUES ($1,$2)",
@@ -703,6 +808,17 @@ async function registerCandidate(pool, { name, email, password, purposes }) {
   }
 }
 
+async function getApplicationIdForJob(pool, candidateId, jobId) {
+  if (!candidateId || !jobId) return null;
+  const r = await pool.query(
+    `SELECT id FROM application
+     WHERE candidate_id = $1 AND job_id = $2
+     ORDER BY applied_at DESC LIMIT 1`,
+    [candidateId, jobId],
+  );
+  return r.rows[0] ? Number(r.rows[0].id) : null;
+}
+
 module.exports = {
   loadAppState,
   saveAppState,
@@ -712,4 +828,5 @@ module.exports = {
   listJobsApi,
   getCandidateMe,
   registerCandidate,
+  getApplicationIdForJob,
 };

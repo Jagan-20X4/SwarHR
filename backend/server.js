@@ -16,8 +16,13 @@ const {
   listJobsApi,
   getCandidateMe,
   registerCandidate,
+  getApplicationIdForJob,
 } = require("./stateRepo");
 const { createCvAnalyserRouter } = require("./routes/cvAnalyser");
+const {
+  createVoiceBotRouter,
+  createAdminInterviewRouter,
+} = require("./routes/interviewVoice");
 
 const PORT = Number(process.env.PORT) || 3001;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -131,6 +136,28 @@ app.get("/api/me", dbReady, requireCandidate, async (req, res) => {
     res.status(500).json({ error: String(e.message || e) });
   }
 });
+
+app.get(
+  "/api/me/application-for-job/:jobId",
+  dbReady,
+  requireCandidate,
+  async (req, res) => {
+    try {
+      const applicationId = await getApplicationIdForJob(
+        pool,
+        req.candidateId,
+        req.params.jobId,
+      );
+      res.json({ applicationId });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  },
+);
+
+app.use("/api/voice-bot", dbReady, createVoiceBotRouter(pool));
+app.use("/api/admin", dbReady, createAdminInterviewRouter(pool));
 
 app.post("/api/auth/login", dbReady, async (req, res) => {
   const { role, email, password, hrId } = req.body || {};
