@@ -17,6 +17,37 @@ function stripBase64Prefix(dataUrl) {
   return dataUrl.slice(i + 7);
 }
 
+function getLatestAppForJob(history, jobId) {
+  const past = (history || []).filter((a) => a.jobId === jobId);
+  if (past.length === 0) return null;
+  return [...past].sort(
+    (a, b) => new Date(b.appliedAt) - new Date(a.appliedAt),
+  )[0];
+}
+
+function parseApplicationAiAnalysis(jsonVal) {
+  if (jsonVal == null) return undefined;
+  const o =
+    typeof jsonVal === "string"
+      ? (() => {
+          try {
+            return JSON.parse(jsonVal);
+          } catch {
+            return null;
+          }
+        })()
+      : jsonVal;
+  if (!o || typeof o !== "object") return undefined;
+  return {
+    summary: o.summary || "",
+    tech: o.tech ?? o.tech_score ?? 0,
+    comm: o.comm ?? o.comm_score ?? 0,
+    rec: o.rec || o.recommendation_label || "",
+    strengths: Array.isArray(o.strengths) ? o.strengths : [],
+    areas: Array.isArray(o.areas) ? o.areas : [],
+  };
+}
+
 async function loadMeta(client) {
   const [org, dpo, cats] = await Promise.all([
     client.query(
@@ -123,18 +154,65 @@ async function loadOneCandidate(client, id) {
         "SELECT purpose_code FROM candidate_purpose WHERE candidate_id = $1 ORDER BY purpose_code",
         [id],
       ),
-      client.query(
-        "SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
-        [id],
-      ),
+      (async () => {
+        try {
+          return await client.query(
+            `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+                    interview_completion_status, reattempt_request_status,
+                    reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+                    reattempt_hr_reason_code, reattempt_hr_notes,
+                    reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
+                    hr_remarks, hr_decision_status, ai_analysis_json
+             FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+            [id],
+          );
+        } catch (e) {
+          if (e.code === "42703") {
+            try {
+              return await client.query(
+                `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+                        interview_completion_status, reattempt_request_status,
+                        reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+                        reattempt_hr_reason_code, reattempt_hr_notes,
+                        reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
+                 FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+                [id],
+              );
+            } catch (e2) {
+              if (e2.code === "42703") {
+                return await client.query(
+                  "SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
+                  [id],
+                );
+              }
+              throw e2;
+            }
+          }
+          throw e;
+        }
+      })(),
       client.query(
         "SELECT body FROM grievance WHERE candidate_id = $1 ORDER BY created_at",
         [id],
       ),
-      client.query(
-        "SELECT role, content FROM transcript_line WHERE candidate_id = $1 ORDER BY line_index",
-        [id],
-      ),
+      (async () => {
+        try {
+          return await client.query(
+            `SELECT application_id, role, content, line_index
+             FROM transcript_line WHERE candidate_id = $1
+             ORDER BY application_id NULLS FIRST, line_index`,
+            [id],
+          );
+        } catch (e) {
+          if (e.code === "42703") {
+            return await client.query(
+              "SELECT role, content, line_index FROM transcript_line WHERE candidate_id = $1 ORDER BY line_index",
+              [id],
+            );
+          }
+          throw e;
+        }
+      })(),
       client.query(
         "SELECT summary, tech_score, comm_score, recommendation_label FROM candidate_analysis WHERE candidate_id = $1",
         [id],
@@ -179,13 +257,82 @@ async function loadOneCandidate(client, id) {
     };
   }
 
-  const transcript =
-    lines.rows.length > 0
-      ? lines.rows.map((row) => ({
-          role: row.role === "assistant" || row.role === "ai" ? "ai" : "user",
-          text: row.content,
-        }))
-      : undefined;
+  const hasAppIdCol =
+    lines.rows.length > 0 && Object.prototype.hasOwnProperty.call(lines.rows[0], "application_id");
+  const byApp = new Map();
+  const legacyLines = [];
+  for (const row of lines.rows) {
+    const entry = {
+      role: row.role === "assistant" || row.role === "ai" ? "ai" : "user",
+      text: row.content,
+    };
+    if (!hasAppIdCol || row.application_id == null) {
+      legacyLines.push(entry);
+    } else {
+      const aid = Number(row.application_id);
+      if (!byApp.has(aid)) byApp.set(aid, []);
+      byApp.get(aid).push(entry);
+    }
+  }
+
+  const hasReattemptCols =
+    apps.rows.length > 0 &&
+    Object.prototype.hasOwnProperty.call(apps.rows[0], "interview_completion_status");
+  const hasPerAppHrCols =
+    apps.rows.length > 0 &&
+    Object.prototype.hasOwnProperty.call(apps.rows[0], "hr_remarks");
+
+  const applicationHistory = apps.rows.map((r) => {
+    const aid = Number(r.id);
+    const tx = byApp.get(aid);
+    const base = {
+      applicationId: aid,
+      jobId: r.job_id,
+      appliedAt: new Date(r.applied_at).toISOString(),
+      interviewScheduledAt: r.interview_scheduled_at
+        ? new Date(r.interview_scheduled_at).toISOString()
+        : undefined,
+      interviewCompletedAt: r.interview_completed_at
+        ? new Date(r.interview_completed_at).toISOString()
+        : undefined,
+      transcript: tx && tx.length > 0 ? tx : undefined,
+    };
+    if (!hasReattemptCols) return base;
+    const withReattempt = {
+      ...base,
+      interviewCompletionStatus: r.interview_completion_status || "not_started",
+      reattemptRequestStatus: r.reattempt_request_status || "none",
+      reattemptCandidateReasonCode: r.reattempt_candidate_reason_code || undefined,
+      reattemptCandidateReasonText: r.reattempt_candidate_reason_text || undefined,
+      reattemptHrReasonCode: r.reattempt_hr_reason_code || undefined,
+      reattemptHrNotes: r.reattempt_hr_notes || undefined,
+      reattemptRequestedAt: r.reattempt_requested_at
+        ? new Date(r.reattempt_requested_at).toISOString()
+        : undefined,
+      reattemptResolvedAt: r.reattempt_resolved_at
+        ? new Date(r.reattempt_resolved_at).toISOString()
+        : undefined,
+      reattemptResolvedByHrId: r.reattempt_resolved_by_hr_id || undefined,
+    };
+    if (!hasPerAppHrCols) return withReattempt;
+    const appAi = parseApplicationAiAnalysis(r.ai_analysis_json);
+    return {
+      ...withReattempt,
+      hrRemarks: r.hr_remarks != null ? String(r.hr_remarks) : "",
+      hrDecisionStatus: r.hr_decision_status || undefined,
+      analysis: appAi,
+    };
+  });
+
+  const latestForJob = getLatestAppForJob(applicationHistory, b.job_id);
+  let transcript;
+  if (latestForJob?.transcript?.length) {
+    transcript = latestForJob.transcript;
+  } else if (legacyLines.length > 0) {
+    transcript = legacyLines;
+  } else {
+    transcript = undefined;
+  }
 
   return {
     id: b.id,
@@ -201,17 +348,7 @@ async function loadOneCandidate(client, id) {
     consentAt: b.consent_at ? new Date(b.consent_at).toISOString() : null,
     fromTalentPool: b.from_talent_pool,
     purposes: purposes.rows.map((r) => r.purpose_code),
-    applicationHistory: apps.rows.map((r) => ({
-      applicationId: Number(r.id),
-      jobId: r.job_id,
-      appliedAt: new Date(r.applied_at).toISOString(),
-      interviewScheduledAt: r.interview_scheduled_at
-        ? new Date(r.interview_scheduled_at).toISOString()
-        : undefined,
-      interviewCompletedAt: r.interview_completed_at
-        ? new Date(r.interview_completed_at).toISOString()
-        : undefined,
-    })),
+    applicationHistory,
     grievances: grievRows.rows.map((r) => r.body),
     transcript,
     analysis: analysisObj || undefined,
@@ -436,18 +573,151 @@ async function saveAppState(pool, body) {
           [c.id, p],
         );
       }
+      const insertedApps = [];
       for (const a of c.applicationHistory || []) {
-        await client.query(
-          `INSERT INTO application (candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [
-            c.id,
-            a.jobId,
-            new Date(a.appliedAt),
-            a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
-            a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
-          ],
-        );
+        const ic =
+          a.interviewCompletionStatus != null
+            ? String(a.interviewCompletionStatus)
+            : "not_started";
+        const rs =
+          a.reattemptRequestStatus != null
+            ? String(a.reattemptRequestStatus)
+            : "none";
+        let ins;
+        const aiPayload =
+          a.analysis && typeof a.analysis === "object"
+            ? {
+                summary: a.analysis.summary || "",
+                tech: a.analysis.tech ?? 0,
+                comm: a.analysis.comm ?? 0,
+                rec: a.analysis.rec || "",
+                strengths: a.analysis.strengths || [],
+                areas: a.analysis.areas || [],
+              }
+            : null;
+        try {
+          ins = await client.query(
+            `INSERT INTO application (
+               candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+               interview_completion_status, reattempt_request_status,
+               reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+               reattempt_hr_reason_code, reattempt_hr_notes,
+               reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
+               hr_remarks, hr_decision_status, ai_analysis_json
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
+            [
+              c.id,
+              a.jobId,
+              new Date(a.appliedAt),
+              a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
+              a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
+              ic,
+              rs,
+              a.reattemptCandidateReasonCode || null,
+              a.reattemptCandidateReasonText || null,
+              a.reattemptHrReasonCode || null,
+              a.reattemptHrNotes || null,
+              a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+              a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+              a.reattemptResolvedByHrId || null,
+              a.hrRemarks != null ? String(a.hrRemarks) : null,
+              a.hrDecisionStatus || null,
+              aiPayload,
+            ],
+          );
+        } catch (e) {
+          if (e.code === "42703") {
+            try {
+              ins = await client.query(
+                `INSERT INTO application (
+                   candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+                   interview_completion_status, reattempt_request_status,
+                   reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+                   reattempt_hr_reason_code, reattempt_hr_notes,
+                   reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
+                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+                [
+                  c.id,
+                  a.jobId,
+                  new Date(a.appliedAt),
+                  a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
+                  a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
+                  ic,
+                  rs,
+                  a.reattemptCandidateReasonCode || null,
+                  a.reattemptCandidateReasonText || null,
+                  a.reattemptHrReasonCode || null,
+                  a.reattemptHrNotes || null,
+                  a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+                  a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+                  a.reattemptResolvedByHrId || null,
+                ],
+              );
+            } catch (e2) {
+              if (e2.code === "42703") {
+                ins = await client.query(
+                  `INSERT INTO application (candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at)
+                   VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+                  [
+                    c.id,
+                    a.jobId,
+                    new Date(a.appliedAt),
+                    a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
+                    a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
+                  ],
+                );
+              } else throw e2;
+            }
+          } else throw e;
+        }
+        insertedApps.push({
+          dbId: Number(ins.rows[0].id),
+          jobId: a.jobId,
+          appliedAt: a.appliedAt,
+          transcript: a.transcript,
+        });
+      }
+
+      const anyPerAppTranscript = insertedApps.some(
+        (x) => x.transcript && x.transcript.length > 0,
+      );
+      const legacyTarget =
+        c.transcript &&
+        c.transcript.length > 0 &&
+        !anyPerAppTranscript &&
+        c.jobId &&
+        getLatestAppForJob(insertedApps, c.jobId);
+      const legacyDbId = legacyTarget ? legacyTarget.dbId : null;
+
+      for (const row of insertedApps) {
+        const lines =
+          row.transcript && row.transcript.length > 0
+            ? row.transcript
+            : legacyDbId != null && row.dbId === legacyDbId
+              ? c.transcript
+              : null;
+        if (!lines || lines.length === 0) continue;
+        let idx = 0;
+        for (const line of lines) {
+          const role = line.role === "ai" ? "ai" : "user";
+          const text = line.text || "";
+          try {
+            await client.query(
+              `INSERT INTO transcript_line (candidate_id, application_id, line_index, role, content)
+               VALUES ($1,$2,$3,$4,$5)`,
+              [c.id, row.dbId, idx, role, text],
+            );
+          } catch (e) {
+            if (e.code === "42703") {
+              await client.query(
+                `INSERT INTO transcript_line (candidate_id, line_index, role, content)
+                 VALUES ($1,$2,$3,$4)`,
+                [c.id, idx, role, text],
+              );
+            } else throw e;
+          }
+          idx += 1;
+        }
       }
       for (const g of c.grievances || []) {
         const bodyText = typeof g === "string" ? g : g.body || "";
@@ -456,18 +726,6 @@ async function saveAppState(pool, body) {
             "INSERT INTO grievance (candidate_id, body) VALUES ($1,$2)",
             [c.id, bodyText],
           );
-      }
-      if (c.transcript && c.transcript.length > 0) {
-        let idx = 0;
-        for (const line of c.transcript) {
-          const role =
-            line.role === "ai" ? "ai" : "user";
-          await client.query(
-            `INSERT INTO transcript_line (candidate_id, line_index, role, content)
-             VALUES ($1,$2,$3,$4)`,
-            [c.id, idx++, role, line.text || ""],
-          );
-        }
       }
       if (c.analysis) {
         const a = c.analysis;

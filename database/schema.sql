@@ -75,7 +75,19 @@ CREATE TABLE application (
   job_id VARCHAR(64) REFERENCES job(id) ON DELETE SET NULL,
   applied_at TIMESTAMPTZ NOT NULL,
   interview_scheduled_at TIMESTAMPTZ,
-  interview_completed_at TIMESTAMPTZ
+  interview_completed_at TIMESTAMPTZ,
+  interview_completion_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+  reattempt_request_status VARCHAR(32) NOT NULL DEFAULT 'none',
+  reattempt_candidate_reason_code VARCHAR(64),
+  reattempt_candidate_reason_text TEXT,
+  reattempt_hr_reason_code VARCHAR(64),
+  reattempt_hr_notes TEXT,
+  reattempt_requested_at TIMESTAMPTZ,
+  reattempt_resolved_at TIMESTAMPTZ,
+  reattempt_resolved_by_hr_id VARCHAR(64),
+  hr_remarks TEXT,
+  hr_decision_status VARCHAR(32),
+  ai_analysis_json JSONB
 );
 
 CREATE TABLE grievance (
@@ -88,11 +100,14 @@ CREATE TABLE grievance (
 CREATE TABLE transcript_line (
   id BIGSERIAL PRIMARY KEY,
   candidate_id VARCHAR(64) NOT NULL REFERENCES candidate(id) ON DELETE CASCADE,
+  application_id BIGINT REFERENCES application(id) ON DELETE CASCADE,
   line_index INT NOT NULL,
   role VARCHAR(16) NOT NULL,
-  content TEXT NOT NULL,
-  CONSTRAINT uq_transcript_candidate_line UNIQUE (candidate_id, line_index)
+  content TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX uq_transcript_app_line ON transcript_line (application_id, line_index) WHERE application_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_transcript_cand_line_legacy ON transcript_line (candidate_id, line_index) WHERE application_id IS NULL;
 
 CREATE TABLE candidate_analysis (
   candidate_id VARCHAR(64) PRIMARY KEY REFERENCES candidate(id) ON DELETE CASCADE,

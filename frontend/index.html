@@ -68,7 +68,7 @@
 
     const VALID_EXTS = ["jpg", "jpeg", "pdf", "doc", "docx"];
 
-    const SB = { REGISTERED: "bg-slate-100 text-slate-600", APPLIED: "bg-amber-100 text-amber-700", SHORTLISTED: "bg-blue-100 text-blue-700", INTERVIEWED: "bg-teal-100 text-teal-700", REJECTED: "bg-red-100 text-red-600", WITHDRAWN: "bg-purple-100 text-purple-700" };
+    const SB = { REGISTERED: "bg-slate-100 text-slate-600", APPLIED: "bg-amber-100 text-amber-700", SCHEDULED: "bg-sky-100 text-sky-800", SHORTLISTED: "bg-blue-100 text-blue-700", INTERVIEWED: "bg-teal-100 text-teal-700", REJECTED: "bg-red-100 text-red-600", WITHDRAWN: "bg-purple-100 text-purple-700", REATTMPT: "bg-violet-100 text-violet-800" };
 
     const TP_SOURCE_OPTIONS = [
       { value: "", label: "— Select source —" },
@@ -102,6 +102,111 @@
     function authHeaders() {
       const t = localStorage.getItem(LS_TOKEN);
       return t ? { Authorization: "Bearer " + t } : {};
+    }
+
+    const LS_ABANDON_QUEUE = "swar_abandon_queue_v1";
+    const ABANDON_FETCH_TIMEOUT_MS = 8000;
+
+    function readAbandonQueue() {
+      try {
+        const raw = localStorage.getItem(LS_ABANDON_QUEUE);
+        if (!raw) return [];
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function writeAbandonQueue(items) {
+      try {
+        localStorage.setItem(LS_ABANDON_QUEUE, JSON.stringify(items.slice(0, 25)));
+      } catch (_) {}
+    }
+
+    function dequeueAbandonJob(applicationId) {
+      const aid = parseInt(String(applicationId), 10);
+      if (!Number.isFinite(aid)) return;
+      writeAbandonQueue(readAbandonQueue().filter((x) => x.applicationId !== aid));
+    }
+
+    function enqueueAbandonJob({ applicationId, clientDetail, token: tokenOpt }) {
+      const token = tokenOpt || localStorage.getItem(LS_TOKEN);
+      const aid = parseInt(String(applicationId), 10);
+      if (!token || !Number.isFinite(aid)) return;
+      const q = readAbandonQueue();
+      if (q.some((x) => x.applicationId === aid)) return;
+      q.push({
+        applicationId: aid,
+        clientDetail: String(clientDetail || "").slice(0, 2000),
+        token,
+        ts: Date.now(),
+      });
+      writeAbandonQueue(q);
+    }
+
+    /**
+     * POST abandon (8s cap) → sendBeacon with token in JSON body → optional localStorage queue for `online` retry.
+     * @param {object} [opts]
+     * @param {boolean} [opts.noEnqueue] — do not enqueue on total failure (used when flushing queued items).
+     * @param {string} [opts.token] — JWT (defaults to LS_TOKEN).
+     */
+    async function postInterviewAbandonWithFallback(applicationId, clientDetail, opts = {}) {
+      const { noEnqueue = false, token: tokenOpt = null } = opts;
+      const aid = parseInt(String(applicationId), 10);
+      if (!Number.isFinite(aid)) return false;
+      const detail = String(clientDetail || "").slice(0, 2000);
+      const token = (tokenOpt && String(tokenOpt)) || localStorage.getItem(LS_TOKEN);
+      if (!token) return false;
+      const bodyJson = JSON.stringify({ applicationId: aid, clientDetail: detail });
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), ABANDON_FETCH_TIMEOUT_MS);
+      try {
+        const res = await fetch("/api/voice-bot/interview-session-abandon", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
+          body: bodyJson,
+          signal: ctrl.signal,
+          keepalive: true,
+        });
+        clearTimeout(tid);
+        if (res.ok) {
+          dequeueAbandonJob(aid);
+          return true;
+        }
+      } catch (_) {
+        clearTimeout(tid);
+      }
+      try {
+        const blob = new Blob([JSON.stringify({ applicationId: aid, clientDetail: detail, token })], {
+          type: "application/json",
+        });
+        if (navigator.sendBeacon("/api/voice-bot/interview-session-abandon-beacon", blob)) {
+          dequeueAbandonJob(aid);
+          return true;
+        }
+      } catch (_) {}
+      if (!noEnqueue) enqueueAbandonJob({ applicationId: aid, clientDetail: detail, token });
+      return false;
+    }
+
+    async function flushPendingAbandonQueue() {
+      const q = readAbandonQueue();
+      if (q.length === 0) return;
+      const remaining = [];
+      for (const item of q) {
+        const token = item.token || localStorage.getItem(LS_TOKEN);
+        if (!token) {
+          remaining.push(item);
+          continue;
+        }
+        const ok = await postInterviewAbandonWithFallback(item.applicationId, item.clientDetail, {
+          noEnqueue: true,
+          token,
+        });
+        if (!ok) remaining.push(item);
+      }
+      writeAbandonQueue(remaining);
     }
 
     function parsePath(pathname, search) {
@@ -192,6 +297,71 @@
       return [...past].sort((a, b) => new Date(b.appliedAt) - new Date(a.appliedAt))[0];
     }
 
+    function candidateHasAnyInterviewTranscript(c) {
+      if (c?.transcript?.length) return true;
+      return (c?.applicationHistory || []).some((h) => h.transcript?.length > 0);
+    }
+
+    function transcriptLinesForApplication(c, applicationId) {
+      if (applicationId == null) return null;
+      const app = (c?.applicationHistory || []).find((a) => a.applicationId === applicationId);
+      if (app?.transcript?.length) return app.transcript;
+      const latest = getLatestAppForJob(c?.applicationHistory || [], c?.jobId);
+      if (
+        latest?.applicationId === applicationId &&
+        c?.transcript?.length &&
+        !(c.applicationHistory || []).some((h) => h.transcript?.length > 0)
+      )
+        return c.transcript;
+      return null;
+    }
+
+    function activeRoleHasTranscript(c) {
+      const latest = getLatestAppForJob(c?.applicationHistory || [], c?.jobId);
+      if (!latest) return false;
+      return !!(latest.transcript?.length ||
+        (c?.transcript?.length && !(c.applicationHistory || []).some((h) => h.transcript?.length > 0)));
+    }
+
+    const CANDIDATE_REATTEMPT_REASONS = [
+      { value: "TECH_NETWORK", label: "Network / connectivity dropped" },
+      { value: "MIC_DEVICE", label: "Microphone or device failed" },
+      { value: "Genuine_CONSTRAINT", label: "Genuine constraint (power, emergency, etc.)" },
+      { value: "OTHER", label: "Other (explain in notes)" },
+    ];
+
+    const HR_REATTEMPT_REASON_LABELS = {
+      CANDIDATE_CONSTRAINTS: "Candidate faced genuine constraints",
+      QUALITY_IMPACTED: "Interview quality impacted (noise, device, etc.)",
+      BUSINESS_EXCEPTION: "Business exception approval",
+      BORDERLINE_HIGH_POTENTIAL: "Borderline score – high potential reassessment",
+    };
+
+    function interviewEligibleForJob(c, jobId) {
+      const app = getLatestAppForJob(c?.applicationHistory || [], jobId);
+      if (!app) return { ok: false, reason: "No application for this role." };
+      const hasMeta =
+        app.interviewCompletionStatus != null || app.reattemptRequestStatus != null;
+      const ic =
+        app.interviewCompletionStatus ||
+        (app.interviewCompletedAt ? "completed" : "not_started");
+      const rs = app.reattemptRequestStatus || "none";
+      if (!hasMeta && (ic === "completed" || app.interviewCompletedAt) && rs === "none" && transcriptAvailableForJob(c, jobId)) {
+        return { ok: false, reason: "Interview already completed. Use Request reattempt on your dashboard if HR allows another attempt." };
+      }
+      if (ic === "not_started" || ic === "in_progress") return { ok: true };
+      if (ic === "incomplete_technical") {
+        if (rs === "approved") return { ok: true };
+        if (rs === "pending") return { ok: false, reason: "Your reattempt request is pending HR approval." };
+        return { ok: false, reason: "Interview did not finish (technical). Submit a reattempt request from your dashboard." };
+      }
+      if (ic === "completed") {
+        if (rs === "approved") return { ok: true };
+        return { ok: false, reason: "Interview already completed. Request HR reassessment from your dashboard if applicable." };
+      }
+      return { ok: true };
+    }
+
     function patchLatestApp(history, jobId, patch) {
       const h = [...(history || [])];
       let bestI = -1;
@@ -207,6 +377,70 @@
       if (bestI < 0) return history;
       h[bestI] = { ...h[bestI], ...patch };
       return h;
+    }
+
+    function patchApplicationById(history, applicationId, patch) {
+      if (!Array.isArray(history) || applicationId == null) return history || [];
+      return history.map((row) =>
+        row.applicationId === applicationId ? { ...row, ...patch } : row,
+      );
+    }
+
+    function transcriptAvailableForJob(c, jobId) {
+      const app = getLatestAppForJob(c?.applicationHistory || [], jobId);
+      if (!app || app.applicationId == null) return false;
+      const lines = transcriptLinesForApplication(c, app.applicationId);
+      return !!(lines && lines.length > 0);
+    }
+
+    /** True when the latest application ended with a technical/session dropout and the candidate may submit (or re-submit after rejection) an HR reattempt request. */
+    function applicationEligibleForTechnicalReattemptRequest(app) {
+      if (!app || app.applicationId == null) return false;
+      if (app.interviewCompletionStatus !== "incomplete_technical") return false;
+      const rs = app.reattemptRequestStatus || "none";
+      if (rs !== "none" && rs !== "rejected") return false;
+      const hr = app.hrDecisionStatus;
+      if (hr === "SHORTLISTED" || hr === "REJECTED") return false;
+      return true;
+    }
+
+    /** True once the candidate has any reattempt workflow recorded (submitted, approved, or rejected). */
+    function applicationHasReattemptHistory(app) {
+      const rs = app?.reattemptRequestStatus || "none";
+      return rs !== "none";
+    }
+
+    function portalStatusLabel(c, jobId) {
+      const app = getLatestAppForJob(c?.applicationHistory || [], jobId);
+      if (!app) return "—";
+      if (app.hrDecisionStatus === "SHORTLISTED" || app.hrDecisionStatus === "REJECTED") return app.hrDecisionStatus;
+      if (app.interviewCompletionStatus === "incomplete_technical") return "REATTMPT";
+      if (app.interviewCompletedAt || app.interviewCompletionStatus === "completed") return "INTERVIEWED";
+      if (app.interviewScheduledAt) return "SCHEDULED";
+      return "APPLIED";
+    }
+
+    /** One row per distinct job (latest application), matching candidate portal pills — for HR Analysis tabs. */
+    function hrAnalysisRoleRows(candidate) {
+      if (!candidate) return [];
+      const hist = candidate.applicationHistory || [];
+      const jobIdsOrdered = [];
+      const seen = new Set();
+      for (const a of hist) {
+        if (a.jobId && !seen.has(a.jobId)) {
+          seen.add(a.jobId);
+          jobIdsOrdered.push(a.jobId);
+        }
+      }
+      if (candidate.jobId && !seen.has(candidate.jobId)) jobIdsOrdered.push(candidate.jobId);
+      const rows = [];
+      for (const jid of jobIdsOrdered) {
+        const app = getLatestAppForJob(hist, jid);
+        if (app && app.applicationId != null) {
+          rows.push({ applicationId: app.applicationId, jobId: jid });
+        }
+      }
+      return rows;
     }
 
     function getCoolingStatus(history, jobId, coolingMonths) {
@@ -477,7 +711,104 @@
       );
     }
 
-    function HRDash({ candidates, jobs, talentPool, auditLog, onView, onInterview, onAnalysis, onCvAnalyser, onJobs, onScreen, onTalentPool, onAuditLog, onLogout }) {
+    function ReattemptQueue({ onBack, onResolved }) {
+      const [items, setItems] = useState([]);
+      const [loading, setLoading] = useState(true);
+      const [sel, setSel] = useState(null);
+      const [decision, setDecision] = useState("approve");
+      const [hrCode, setHrCode] = useState("QUALITY_IMPACTED");
+      const [hrNotes, setHrNotes] = useState("");
+      const [busy, setBusy] = useState(false);
+      const load = () => {
+        setLoading(true);
+        const tok = localStorage.getItem(LS_TOKEN);
+        fetch("/api/admin/reattempt-pending", { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
+          .then((r) => (r.ok ? r.json() : { items: [] }))
+          .then((d) => setItems(d.items || []))
+          .catch(() => setItems([]))
+          .finally(() => setLoading(false));
+      };
+      useEffect(() => { load(); }, []);
+      const submit = async () => {
+        if (!sel) return;
+        setBusy(true);
+        try {
+          const tok = localStorage.getItem(LS_TOKEN);
+          const r = await fetch(`/api/admin/applications/${sel.applicationId}/reattempt-resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...(tok ? { Authorization: `Bearer ${tok}` } : {}) },
+            body: JSON.stringify({ decision, hrReasonCode: hrCode, hrNotes: hrNotes.trim() }),
+          });
+          if (!r.ok) {
+            const e = await r.json().catch(() => ({}));
+            window.alert(e.error || "Request failed");
+          } else {
+            setSel(null);
+            setHrNotes("");
+            load();
+            if (typeof onResolved === "function") await onResolved();
+          }
+        } finally {
+          setBusy(false);
+        }
+      };
+      return (
+        <div className="min-h-screen bg-slate-50">
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3">
+            <button type="button" onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button>
+            <span className="font-bold">Reattempt approvals</span>
+            <Badge />
+          </div>
+          <div className="max-w-3xl mx-auto px-6 py-8">
+            {loading ? <p className="text-slate-500 text-sm">Loading…</p> : items.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center text-slate-500 text-sm">No pending reattempt requests.</div>
+            ) : (
+              <div className="space-y-3">
+                {items.map((row) => (
+                  <button
+                    key={row.applicationId}
+                    type="button"
+                    onClick={() => { setSel(row); setDecision("approve"); setHrCode("QUALITY_IMPACTED"); }}
+                    className="w-full text-left bg-white rounded-2xl border border-slate-200 p-4 hover:border-indigo-300 transition-colors"
+                  >
+                    <p className="font-bold text-slate-900">{row.candidateName}</p>
+                    <p className="text-xs text-slate-500">{row.candidateEmail}</p>
+                    <p className="text-sm text-indigo-700 font-semibold mt-1">{row.jobTitle || "—"} · Application #{row.applicationId}</p>
+                    <p className="text-xs text-slate-400 mt-1">Requested: {row.requestedAt ? fmtDateTime(row.requestedAt) : "—"}</p>
+                    {row.candidateReasonCode && <p className="text-xs text-slate-600 mt-2">Candidate: {row.candidateReasonCode}{row.candidateReasonText ? ` — ${row.candidateReasonText.slice(0, 200)}` : ""}</p>}
+                  </button>
+                ))}
+              </div>
+            )}
+            {sel && (
+              <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50" onClick={() => !busy && setSel(null)}>
+                <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+                  <h3 className="font-black text-slate-900 mb-2">Resolve reattempt</h3>
+                  <p className="text-sm text-slate-600 mb-4">{sel.candidateName} · {sel.jobTitle}</p>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Decision</label>
+                  <select value={decision} onChange={(e) => setDecision(e.target.value)} className="w-full border rounded-xl px-3 py-2 mb-3 text-sm">
+                    <option value="approve">Approve (clears prior answers &amp; transcript for this application)</option>
+                    <option value="reject">Reject</option>
+                  </select>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">HR reason (required)</label>
+                  <select value={hrCode} onChange={(e) => setHrCode(e.target.value)} className="w-full border rounded-xl px-3 py-2 mb-3 text-sm">
+                    {Object.keys(HR_REATTEMPT_REASON_LABELS).map((k) => <option key={k} value={k}>{HR_REATTEMPT_REASON_LABELS[k]}</option>)}
+                  </select>
+                  <label className="block text-xs font-bold text-slate-500 mb-1">Notes (optional)</label>
+                  <textarea value={hrNotes} onChange={(e) => setHrNotes(e.target.value)} rows={3} className="w-full border rounded-xl px-3 py-2 mb-4 text-sm resize-none" placeholder="Internal notes…" />
+                  <div className="flex gap-2">
+                    <button type="button" disabled={busy} onClick={() => setSel(null)} className="flex-1 py-2 border rounded-xl text-sm font-bold">Cancel</button>
+                    <button type="button" disabled={busy} onClick={submit} className="flex-1 py-2 bg-indigo-600 text-white rounded-xl text-sm font-bold">{busy ? "…" : "Submit"}</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    function HRDash({ candidates, jobs, talentPool, auditLog, reattemptPendingCount, onView, onInterview, onAnalysis, onCvAnalyser, onJobs, onScreen, onTalentPool, onAuditLog, onReattempts, onLogout }) {
       const [filter, setFilter] = useState("ALL");
       const stats = [{ l: "Total", v: candidates.length, s: "ALL" }, { l: "Applied", v: candidates.filter(c => c.status === "APPLIED").length, s: "APPLIED" }, { l: "Shortlisted", v: candidates.filter(c => c.status === "SHORTLISTED").length, s: "SHORTLISTED" }, { l: "Interviewed", v: candidates.filter(c => c.status === "INTERVIEWED").length, s: "INTERVIEWED" }, { l: "Rejected", v: candidates.filter(c => c.status === "REJECTED").length, s: "REJECTED" }];
       const jt = id => jobs.find(j => j.id === id)?.title || "—";
@@ -492,6 +823,9 @@
               <button onClick={onJobs} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">Jobs</button>
               <button onClick={onTalentPool} className="px-3 py-1.5 bg-purple-700 hover:bg-purple-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">🌟 Talent Pool ({talentPool.length})</button>
               <button onClick={onScreen} className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">Screen</button>
+              <button type="button" onClick={onReattempts} className="px-3 py-1.5 bg-amber-800 hover:bg-amber-700 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform relative">
+                Reattempts{typeof reattemptPendingCount === "number" && reattemptPendingCount > 0 ? <span className="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center">{reattemptPendingCount > 9 ? "9+" : reattemptPendingCount}</span> : null}
+              </button>
               <button onClick={onAuditLog} className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform">📋 Audit</button>
               <button type="button" onClick={onLogout} className="px-3 py-1.5 bg-red-900/50 hover:bg-red-900 text-red-300 rounded-lg text-sm font-medium">Logout</button>
             </div>
@@ -512,16 +846,18 @@
                   {schedFor(c) ? <p className="text-xs font-bold text-teal-700 mb-2">📅 Interview scheduled: {fmtDateTime(schedFor(c))}</p> : null}
                   <div className="flex items-center gap-2 mb-3 flex-wrap">
                     <div className={`text-xs font-bold px-2 py-1 rounded-lg ${c.consent ? "bg-green-50 text-green-600" : "bg-red-50 text-red-500"}`}>{c.consent ? "✓ Consent" : "⚠ No consent"}</div>
-                    {c.transcript && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-teal-50 text-teal-600">🎤 Done</div>}
+                    {candidateHasAnyInterviewTranscript(c) && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-teal-50 text-teal-600">🎤 Done</div>}
                     {c.fromTalentPool && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-amber-50 text-amber-700">🌟 Pool</div>}
                     {(c.applicationHistory || []).length > 1 && <div className="text-xs font-bold px-2 py-1 rounded-lg bg-slate-100 text-slate-600">{c.applicationHistory.length} apps</div>}
                   </div>
                   <div className="flex gap-2 pt-3 border-t border-slate-100" onClick={e => e.stopPropagation()}>
                     <button onClick={() => onView(c.id)} className="flex-1 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg">View</button>
-                    {c.consent && !(c.transcript && c.transcript.length > 0) && (c.status === "SHORTLISTED" || c.status === "APPLIED") && (
+                    {c.consent && !activeRoleHasTranscript(c) && (c.status === "SHORTLISTED" || c.status === "APPLIED") && (
                       <button onClick={() => onInterview(c.id)} className="flex-1 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg">Start interview</button>
                     )}
-                    {(c.status === "INTERVIEWED" || c.analysis) && <button onClick={() => onAnalysis(c.id)} className="flex-1 py-2 bg-teal-600 text-white text-xs font-bold rounded-lg">Analysis</button>}
+                    {(c.status === "INTERVIEWED" || c.analysis || candidateHasAnyInterviewTranscript(c) || (c.applicationHistory || []).some((a) => a.analysis || a.interviewCompletedAt)) && (
+                      <button onClick={() => onAnalysis(c.id)} className="flex-1 py-2 bg-teal-600 text-white text-xs font-bold rounded-lg">Analysis</button>
+                    )}
                   </div>
                 </div>
               ))}</div>
@@ -536,23 +872,53 @@
       const [detailTab, setDetailTab] = useState("timeline");
       const [interviewAns, setInterviewAns] = useState(null);
       const [interviewLoading, setInterviewLoading] = useState(false);
-      const applicationIdForInterview = getLatestAppForJob(candidate.applicationHistory, candidate.jobId)?.applicationId;
+      const [selectedApplicationId, setSelectedApplicationId] = useState(null);
       const appliedList = (candidate.applicationHistory || []).map(a => ({ ...a, job: jobs.find(j => j.id === a.jobId) })).filter(a => a.job);
-      const setStatus = (s) => { onUpdate({ status: s, remarks }); setFlash(`Updated to ${s}`); setTimeout(onBack, 800); };
+      useEffect(() => {
+        const valid = new Set((candidate.applicationHistory || []).map((a) => a.applicationId).filter((id) => id != null));
+        setSelectedApplicationId((prev) => {
+          if (prev != null && valid.has(prev)) return prev;
+          return getLatestAppForJob(candidate.applicationHistory, candidate.jobId)?.applicationId ?? [...valid][0] ?? null;
+        });
+      }, [candidate.id, candidate.jobId, JSON.stringify((candidate.applicationHistory || []).map((a) => [a.applicationId, a.jobId]))]);
+      const selectedAppRow = appliedList.find((a) => a.applicationId === selectedApplicationId) || null;
+      useEffect(() => {
+        const appRm = selectedAppRow?.hrRemarks != null ? String(selectedAppRow.hrRemarks) : "";
+        if (appRm !== "") setRemarks(appRm);
+        else setRemarks(candidate.remarks || "");
+      }, [selectedApplicationId, candidate.id, candidate.remarks, selectedAppRow?.hrRemarks]);
+      const bubbleTranscript = transcriptLinesForApplication(candidate, selectedApplicationId);
+      const analysisForSelected = selectedAppRow?.analysis || candidate.analysis;
+      const setStatus = (s) => {
+        if (selectedApplicationId != null) {
+          onUpdate({
+            applicationHistory: patchApplicationById(candidate.applicationHistory, selectedApplicationId, {
+              hrDecisionStatus: s,
+              hrRemarks: remarks,
+            }),
+            status: s,
+            remarks,
+          });
+        } else {
+          onUpdate({ status: s, remarks });
+        }
+        setFlash(`Updated to ${s}`);
+        setTimeout(onBack, 800);
+      };
       useEffect(() => {
         if (detailTab !== "interview") {
           setInterviewAns(null);
           return;
         }
-        if (!applicationIdForInterview) return;
+        if (selectedApplicationId == null) return;
         setInterviewLoading(true);
         const tok = localStorage.getItem(LS_TOKEN);
-        fetch(`/api/admin/applications/${applicationIdForInterview}/interview-answers`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
+        fetch(`/api/admin/applications/${selectedApplicationId}/interview-answers`, { headers: tok ? { Authorization: `Bearer ${tok}` } : {} })
           .then((r) => (r.ok ? r.json() : { answers: [] }))
           .then(setInterviewAns)
           .catch(() => setInterviewAns({ answers: [] }))
           .finally(() => setInterviewLoading(false));
-      }, [detailTab, applicationIdForInterview]);
+      }, [detailTab, selectedApplicationId]);
       const interviewAnswers = interviewAns?.answers || [];
       const interviewDur = interviewAnswers.reduce((s, a) => s + (a.durationSeconds || 0), 0);
       return (
@@ -583,8 +949,26 @@
             </div>
             {appliedList.length > 0 && (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <h2 className="text-xs font-black text-slate-400 uppercase mb-3">Application History ({appliedList.length})</h2>
-                <div className="space-y-2">{appliedList.map((a, i) => <div key={i} className={`flex items-center justify-between p-3 rounded-xl ${a.jobId === candidate.jobId ? "bg-indigo-50 border border-indigo-200" : "bg-slate-50"}`}><div><p className="font-bold text-slate-900 text-sm">{a.job.title}</p><p className="text-xs text-slate-500">{a.job.location} · Applied {fmtDate(a.appliedAt)}</p>{a.interviewScheduledAt ? <p className="text-xs text-teal-700 font-semibold mt-0.5">Scheduled: {fmtDateTime(a.interviewScheduledAt)}</p> : null}</div>{a.jobId === candidate.jobId && <span className="text-xs font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">Active</span>}</div>)}</div>
+                <h2 className="text-xs font-black text-slate-400 uppercase mb-1">Application History ({appliedList.length})</h2>
+                <p className="text-xs text-slate-500 mb-3">Tap a role to view its AI interview (voice Q&amp;A and chat transcript).</p>
+                <div className="space-y-2">{appliedList.map((a) => (
+                  <button
+                    key={a.applicationId ?? `${a.jobId}-${a.appliedAt}`}
+                    type="button"
+                    onClick={() => a.applicationId != null && setSelectedApplicationId(a.applicationId)}
+                    className={`w-full text-left flex items-center justify-between p-3 rounded-xl transition-all ${a.applicationId === selectedApplicationId ? "ring-2 ring-indigo-400 ring-offset-2" : ""} ${a.jobId === candidate.jobId ? "bg-indigo-50 border border-indigo-200" : "bg-slate-50 border border-transparent hover:border-slate-200"}`}
+                  >
+                    <div>
+                      <p className="font-bold text-slate-900 text-sm">{a.job.title}</p>
+                      <p className="text-xs text-slate-500">{a.job.location} · Applied {fmtDate(a.appliedAt)}</p>
+                      {a.interviewScheduledAt ? <p className="text-xs text-teal-700 font-semibold mt-0.5">Scheduled: {fmtDateTime(a.interviewScheduledAt)}</p> : null}
+                    </div>
+                    <div className="flex flex-col items-end gap-1 shrink-0">
+                      {a.jobId === candidate.jobId && <span className="text-xs font-bold text-indigo-600 bg-indigo-100 px-2 py-0.5 rounded-full">Active</span>}
+                      {a.interviewCompletedAt ? <span className="text-xs font-bold text-teal-600 bg-teal-50 px-2 py-0.5 rounded-full">Interviewed</span> : null}
+                    </div>
+                  </button>
+                ))}</div>
               </div>
             )}
             {candidate.cv && (
@@ -603,28 +987,59 @@
                 )}
               </div>
             )}
-            {candidate.transcript && candidate.transcript.length > 0 && (
+            {bubbleTranscript && bubbleTranscript.length > 0 ? (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <button type="button" onClick={() => setShowTranscript(!showTranscript)} className="w-full flex items-center justify-between"><h2 className="text-xs font-black text-slate-400 uppercase">Interview transcript · {candidate.transcript.length} msgs · {candidate.lang || "English"}</h2><span className="text-indigo-500 text-xs font-bold">{showTranscript ? "▲" : "▼"}</span></button>
-                {showTranscript && <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">{candidate.transcript.map((e, i) => <div key={i} className={`flex ${e.role === "ai" ? "justify-start" : "justify-end"}`}><div className={`max-w-md p-3 rounded-2xl text-sm ${e.role === "ai" ? "bg-slate-100 text-slate-800" : "bg-indigo-600 text-white"}`}><p className="text-xs uppercase font-black mb-1 opacity-50">{e.role === "ai" ? "Swar" : "Candidate"}</p>{e.text}</div></div>)}</div>}
+                <button type="button" onClick={() => setShowTranscript(!showTranscript)} className="w-full flex items-center justify-between text-left gap-2">
+                  <h2 className="text-xs font-black text-slate-400 uppercase">Interview transcript · AI · {selectedAppRow?.job?.title || "—"} · {bubbleTranscript.length} msgs · {candidate.lang || "English"}</h2>
+                  <span className="text-indigo-500 text-xs font-bold shrink-0">{showTranscript ? "▲" : "▼"}</span>
+                </button>
+                {showTranscript && <div className="mt-4 space-y-3 max-h-96 overflow-y-auto">{bubbleTranscript.map((e, i) => <div key={i} className={`flex ${e.role === "ai" ? "justify-start" : "justify-end"}`}><div className={`max-w-md p-3 rounded-2xl text-sm ${e.role === "ai" ? "bg-slate-100 text-slate-800" : "bg-indigo-600 text-white"}`}><p className="text-xs uppercase font-black mb-1 opacity-50">{e.role === "ai" ? "Swar" : "Candidate"}</p>{e.text}</div></div>)}</div>}
               </div>
-            )}
-            {candidate.analysis && (
+            ) : selectedApplicationId != null ? (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <div className="flex items-center justify-between mb-3"><h2 className="text-xs font-black text-slate-400 uppercase">AI Analysis</h2><span className="px-3 py-1 rounded-lg text-white font-black text-xs bg-indigo-600">{candidate.analysis.rec}</span></div>
-                <p className="text-slate-700 text-sm mb-3">{candidate.analysis.summary}</p>
-                <div className="grid grid-cols-2 gap-3"><div className="bg-indigo-50 rounded-xl p-3"><p className="text-xs text-indigo-500 font-bold mb-1">Technical</p><p className="text-2xl font-black text-indigo-700">{candidate.analysis.tech}/10</p></div><div className="bg-teal-50 rounded-xl p-3"><p className="text-xs text-teal-500 font-bold mb-1">Communication</p><p className="text-2xl font-black text-teal-700">{candidate.analysis.comm}/10</p></div></div>
+                <p className="text-xs font-black text-slate-400 uppercase mb-1">Interview transcript · {selectedAppRow?.job?.title || "—"}</p>
+                <p className="text-sm text-slate-500">No AI chat transcript stored for this application yet.</p>
+              </div>
+            ) : null}
+            {analysisForSelected && (
+              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+                <div className="flex items-center justify-between mb-3"><h2 className="text-xs font-black text-slate-400 uppercase">AI Analysis · {selectedAppRow?.job?.title || "—"}</h2><span className="px-3 py-1 rounded-lg text-white font-black text-xs bg-indigo-600">{analysisForSelected.rec}</span></div>
+                <p className="text-slate-700 text-sm mb-3">{analysisForSelected.summary}</p>
+                <div className="grid grid-cols-2 gap-3"><div className="bg-indigo-50 rounded-xl p-3"><p className="text-xs text-indigo-500 font-bold mb-1">Technical</p><p className="text-2xl font-black text-indigo-700">{analysisForSelected.tech}/10</p></div><div className="bg-teal-50 rounded-xl p-3"><p className="text-xs text-teal-500 font-bold mb-1">Communication</p><p className="text-2xl font-black text-teal-700">{analysisForSelected.comm}/10</p></div></div>
               </div>
             )}
             </>) : null}
             {detailTab === "interview" ? (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
-                {!applicationIdForInterview ? (
-                  <p className="text-sm text-slate-500">No application linked to the active role.</p>
+                <div className="border-b border-slate-100 pb-3 space-y-2">
+                  <h2 className="text-xs font-black text-slate-400 uppercase">Voice interview · {selectedAppRow?.job?.title || "—"}</h2>
+                  <p className="text-xs text-slate-500">Pick the job application to load voice Q&amp;A for that interview.</p>
+                  {appliedList.length > 0 ? (
+                    <div>
+                      <label className="text-xs font-bold text-slate-500">Application</label>
+                      <select
+                        value={selectedApplicationId != null ? String(selectedApplicationId) : ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setSelectedApplicationId(v ? Number(v) : null);
+                        }}
+                        className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl text-sm bg-white focus:outline-none focus:border-indigo-400"
+                      >
+                        {appliedList.map((a) => (
+                          <option key={a.applicationId ?? `${a.jobId}-${a.appliedAt}`} value={a.applicationId != null ? String(a.applicationId) : ""} disabled={a.applicationId == null}>
+                            {a.job.title} · {a.job.location}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : null}
+                </div>
+                {selectedApplicationId == null ? (
+                  <p className="text-sm text-slate-500">No application selected.</p>
                 ) : interviewLoading ? (
                   <p className="text-sm text-slate-500">Loading…</p>
                 ) : interviewAnswers.length === 0 ? (
-                  <p className="text-sm text-slate-500">Voice interview not yet completed.</p>
+                  <p className="text-sm text-slate-500">Voice interview not yet completed for this role.</p>
                 ) : (
                   <>
                     <div className="flex flex-wrap gap-4 text-sm text-slate-600 border-b border-slate-100 pb-3">
@@ -653,13 +1068,15 @@
             ) : null}
             {detailTab === "notes" ? (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-              <h2 className="text-xs font-black text-slate-400 uppercase mb-3">HR Actions</h2>
-              <textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
+              <h2 className="text-xs font-black text-slate-400 uppercase mb-3">HR Actions · {selectedAppRow?.job?.title || "role"}</h2>
+              <textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Remarks for this application…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
               <div className="grid grid-cols-2 gap-2">
-                {candidate.consent && candidate.status === "APPLIED" && <button type="button" onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
-                {candidate.consent && !(candidate.transcript && candidate.transcript.length > 0) && (candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && <button type="button" onClick={onInterview} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
-                {(candidate.status === "INTERVIEWED" || candidate.analysis) && <button type="button" onClick={onAnalysis} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>}
-                {candidate.status !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button type="button" onClick={() => { if (window.confirm("Reject?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
+                {candidate.consent && portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) === "APPLIED" && <button type="button" onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
+                {candidate.consent && selectedAppRow?.jobId && !transcriptAvailableForJob(candidate, selectedAppRow.jobId) && (portalStatusLabel(candidate, selectedAppRow.jobId) === "SHORTLISTED" || portalStatusLabel(candidate, selectedAppRow.jobId) === "APPLIED") && <button type="button" onClick={() => typeof onInterview === "function" && onInterview(selectedAppRow.jobId)} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
+                {(portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) === "INTERVIEWED" || analysisForSelected) && (
+                  <button type="button" onClick={() => typeof onAnalysis === "function" && onAnalysis(selectedApplicationId)} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>
+                )}
+                {portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button type="button" onClick={() => { if (window.confirm("Reject this application?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
               </div>
             </div>
             ) : null}
@@ -910,7 +1327,7 @@
       );
     }
 
-    function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false }) {
+    function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onReattemptPortal, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false }) {
       const [q, setQ] = useState("");
       const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
       const f = jobs.filter(j => j.title.toLowerCase().includes(q.toLowerCase()) || j.location.toLowerCase().includes(q.toLowerCase()));
@@ -974,21 +1391,36 @@
                 }
               }
               const dim = locked || showApplied;
+              const latestAppForJob = personal ? getLatestAppForJob(applicationHistory, j.id) : null;
+              const showReattemptPortal =
+                personal &&
+                typeof onReattemptPortal === "function" &&
+                applicationEligibleForTechnicalReattemptRequest(latestAppForJob);
+              const reattemptedNote =
+                personal && latestAppForJob && applicationHasReattemptHistory(latestAppForJob);
               return (
                 <div key={j.id} className={`bg-white rounded-2xl border p-6 flex items-start justify-between flex-wrap gap-3 ${dim ? "border-slate-200 opacity-75" : "border-slate-200 hover:shadow-lg hover:border-indigo-200"}`}>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <h2 className="text-xl font-bold text-slate-900">{j.title}</h2>
                       {locked && coolingDays != null ? <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">Cooling: {coolingDays}d left</span> : null}
+                      {reattemptedNote ? <span className="text-xs font-semibold text-violet-700">(*reattempted)</span> : null}
                     </div>
                     <p className="text-slate-500 text-sm">{j.designation} · {j.location}</p>
                     <p className="text-slate-600 text-sm mt-2 line-clamp-2">{j.description}</p>
                     {extraCoolingLine}
                   </div>
-                  {doApply ? <button type="button" onClick={() => onApply(j)} className="shrink-0 px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl text-sm">Apply</button> : null}
-                  {showContinue ? <button type="button" onClick={() => onContinueInterview(j)} className="shrink-0 px-5 py-2 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-sm">Continue interview →</button> : null}
-                  {locked ? <button type="button" disabled className="shrink-0 px-5 py-2 bg-slate-100 text-slate-400 font-bold rounded-xl text-sm">Locked</button> : null}
-                  {showApplied ? <button type="button" disabled className="shrink-0 px-5 py-2 bg-slate-100 text-slate-500 font-bold rounded-xl text-sm">Applied</button> : null}
+                  <div className="shrink-0 flex flex-col items-end gap-2">
+                    {doApply ? <button type="button" onClick={() => onApply(j)} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl text-sm">Apply</button> : null}
+                    {showContinue ? (
+                      <button type="button" onClick={() => onContinueInterview(j)} className="px-5 py-2 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-sm">Continue interview →</button>
+                    ) : null}
+                    {showReattemptPortal ? (
+                      <button type="button" onClick={() => onReattemptPortal(j)} className="px-5 py-2 bg-violet-600 hover:bg-violet-500 text-white font-bold rounded-xl text-sm">Reattempt</button>
+                    ) : null}
+                    {locked ? <button type="button" disabled className="px-5 py-2 bg-slate-100 text-slate-400 font-bold rounded-xl text-sm">Locked</button> : null}
+                    {showApplied ? <button type="button" disabled className="px-5 py-2 bg-slate-100 text-slate-500 font-bold rounded-xl text-sm">Applied</button> : null}
+                  </div>
                 </div>
               );
             })}{f.length === 0 ? <p className="text-center text-slate-400 py-12">No matching jobs.</p> : null}</div>
@@ -1717,11 +2149,12 @@
       );
     }
 
-    function Intro({ candidate, job, onStart, onBack, onLogout, onSchedule, interviewScheduledAt, bypassSchedule }) {
+    function Intro({ candidate, job, onStart, onBack, onLogout, onSchedule, interviewScheduledAt, bypassSchedule, eligibilityBlock }) {
       const [lang, setLang] = useState("English");
       const [showSched, setShowSched] = useState(false);
       const schedMs = interviewScheduledAt ? new Date(interviewScheduledAt).getTime() : 0;
       const blockStart = !bypassSchedule && schedMs > 0 && Date.now() < schedMs;
+      const blockInterview = Boolean(eligibilityBlock);
       return (
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center">
@@ -1735,8 +2168,9 @@
             <div className="bg-indigo-900/40 border border-indigo-800 rounded-xl p-3 mb-5 text-left text-xs text-indigo-200"><p className="font-bold text-indigo-100 mb-1">🎙️ How it works</p><p>Swar AI speaks questions aloud. Tap mic to answer.</p></div>
             <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Language</label>
             <select value={lang} onChange={e => setLang(e.target.value)} className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white mb-5">{["English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada", "Marathi", "Gujarati", "Malayalam"].map(l => <option key={l} value={l}>{l}</option>)}</select>
+            {eligibilityBlock ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/40 border border-amber-800/50 rounded-lg p-3">{eligibilityBlock}</p> : null}
             {blockStart ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time).</p> : null}
-            <button type="button" disabled={blockStart} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${blockStart ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
+            <button type="button" disabled={blockStart || blockInterview} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${blockStart || blockInterview ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
             <button type="button" onClick={() => setShowSched(true)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl mb-3 border border-indigo-500/50">Maybe later</button>
             <button type="button" onClick={onLogout} className="w-full py-3 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white font-bold rounded-xl mb-2">Logout</button>
             <button type="button" onClick={onBack} className="text-slate-500 text-sm hover:text-slate-300">← Back</button>
@@ -1752,7 +2186,7 @@
       );
     }
 
-    function Interview({ context, applicationId, onEnd }) {
+    function Interview({ context, applicationId, onEnd, onAbandon }) {
       const MAX_AI = 5;
       const RESOLVE_TIMEOUT_MS = 90000;
       const [phase, setPhase] = useState("load");
@@ -1767,6 +2201,25 @@
       const [aiQCount, setAiQCount] = useState(0);
       const [hist, setHist] = useState([]);
       const [ended, setEnded] = useState(false);
+      const endedRef = useRef(false);
+      useEffect(() => {
+        endedRef.current = ended;
+      }, [ended]);
+      const abandonNotifiedRef = useRef(false);
+      const sessionMountRef = useRef(Date.now());
+      useEffect(() => {
+        sessionMountRef.current = Date.now();
+        abandonNotifiedRef.current = false;
+      }, [applicationId]);
+      const visHideTimerRef = useRef(null);
+      const applicationIdRef = useRef(applicationId);
+      useEffect(() => {
+        applicationIdRef.current = applicationId;
+      }, [applicationId]);
+      const onAbandonRef = useRef(onAbandon);
+      useEffect(() => {
+        onAbandonRef.current = onAbandon;
+      }, [onAbandon]);
       const [supported, setSupported] = useState(true);
       const [micError, setMicError] = useState("");
       const [showText, setShowText] = useState(false);
@@ -1779,6 +2232,66 @@
       const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
       const langCode = langMap[context.language] || "en-IN";
       const sysAi = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX_AI} questions, end with [INTERVIEW_COMPLETE].`;
+      const safeAbandon = async (detail) => {
+        if (abandonNotifiedRef.current || !applicationId) return;
+        const fn = onAbandonRef.current;
+        if (typeof fn !== "function") return;
+        abandonNotifiedRef.current = true;
+        try {
+          await fn(detail || "");
+        } catch (_) {}
+      };
+      useEffect(() => {
+        const h = () => {
+          if (endedRef.current || !applicationId) return;
+          void safeAbandon("page_leave");
+        };
+        window.addEventListener("pagehide", h);
+        return () => window.removeEventListener("pagehide", h);
+      }, [applicationId]);
+      useEffect(() => {
+        const h = () => {
+          if (endedRef.current || !applicationId) return;
+          void safeAbandon("network_offline");
+        };
+        window.addEventListener("offline", h);
+        return () => window.removeEventListener("offline", h);
+      }, [applicationId]);
+      useEffect(() => {
+        const clearT = () => {
+          if (visHideTimerRef.current) {
+            clearTimeout(visHideTimerRef.current);
+            visHideTimerRef.current = null;
+          }
+        };
+        const onVis = () => {
+          clearT();
+          if (endedRef.current || !applicationId) return;
+          if (document.visibilityState === "hidden") {
+            const aidSnapshot = applicationIdRef.current;
+            visHideTimerRef.current = setTimeout(() => {
+              visHideTimerRef.current = null;
+              if (document.visibilityState !== "hidden") return;
+              if (endedRef.current || !aidSnapshot) return;
+              if (applicationIdRef.current !== aidSnapshot) return;
+              void safeAbandon("visibility_hidden");
+            }, 12000);
+          }
+        };
+        document.addEventListener("visibilitychange", onVis);
+        return () => {
+          clearT();
+          document.removeEventListener("visibilitychange", onVis);
+        };
+      }, [applicationId]);
+      useEffect(() => {
+        return () => {
+          if (!applicationId) return;
+          if (Date.now() - sessionMountRef.current < 800) return;
+          if (endedRef.current) return;
+          void safeAbandon("component_unmount");
+        };
+      }, [applicationId]);
       useEffect(() => { const load = () => setVoices(window.speechSynthesis?.getVoices?.() || []); load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
       useEffect(() => {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1813,7 +2326,17 @@
         setPhase("load");
         fetch(`/api/voice-bot/interview-script/${applicationId}`, { headers: { ...authHeaders() } })
           .then((r) => { if (!r.ok) throw new Error(); return r.json(); })
-          .then((d) => { if (!cancelled) { setScript(d); setPhase("hr"); } })
+          .then((d) => {
+            if (!cancelled) {
+              setScript(d);
+              setPhase("hr");
+              fetch("/api/voice-bot/interview-session-start", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", ...authHeaders() },
+                body: JSON.stringify({ applicationId }),
+              }).catch(() => {});
+            }
+          })
           .catch(() => { if (!cancelled) setPhase("err"); });
         return () => { cancelled = true; };
       }, [applicationId]);
@@ -1927,9 +2450,13 @@
         }
       };
       const sendAnswer = (text) => dispatchAnswer(text);
-      const endInterview = () => {
+      const endInterview = async () => {
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         if (recRef.current) { try { recRef.current.abort(); } catch {} }
+        if (!ended && applicationId && typeof onAbandon === "function") {
+          await safeAbandon("candidate_clicked_end");
+          return;
+        }
         onEnd(msgs);
       };
       const lastQ = [...msgs].reverse().find((m) => m.role === "ai");
@@ -2002,43 +2529,231 @@
       );
     }
 
-    function Analysis({ context, transcript, onDecision, onBack, onLogout }) {
-      const [data, setData] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null), [remarks, setRemarks] = useState("");
+    function savedAnalysisIsRenderable(a) {
+      if (!a || typeof a !== "object") return false;
+      if (String(a.summary || "").trim().length > 0) return true;
+      if (typeof a.tech === "number" || typeof a.comm === "number") return true;
+      if (Array.isArray(a.strengths) && a.strengths.length > 0) return true;
+      if (Array.isArray(a.areas) && a.areas.length > 0) return true;
+      const rec = String(a.rec || "").trim();
+      if (rec.length > 0 && rec !== "Pending review") return true;
+      return false;
+    }
+
+    function normalizeSavedAnalysis(a) {
+      return {
+        summary: a.summary || "",
+        tech: typeof a.tech === "number" ? a.tech : null,
+        comm: typeof a.comm === "number" ? a.comm : null,
+        rec: a.rec || "Pending review",
+        strengths: Array.isArray(a.strengths) ? a.strengths : [],
+        areas: Array.isArray(a.areas) ? a.areas : [],
+        noTranscript: false,
+        pendingManualGenerate: false,
+      };
+    }
+
+    function analysisInterviewMessages(transcript, jdTitle) {
+      const tx = (transcript || []).map((t) => `${t.role === "ai" ? "SWAR" : "CAND"}: ${t.text}`).join("\n");
+      return [{ role: "user", content: `Analyse for "${jdTitle}". Transcript:\n${tx}\n\nReturn JSON: {"summary":"3 sentences","strengths":["s1","s2","s3"],"areas":["a1","a2","a3"],"tech":7,"comm":8,"rec":"Hire"}` }];
+    }
+
+    function Analysis({ context, transcript, savedAnalysis, roleTabs, selectedApplicationId, onSelectApplication, initialRemarks, onDecision, onBack, onLogout }) {
+      const [data, setData] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null), [remarks, setRemarks] = useState(initialRemarks || "");
+      const autoClaudeConsumedRef = useRef(false);
+      const tabs = roleTabs || [];
+      const showRoleTabs = tabs.length > 0 && typeof onSelectApplication === "function";
+
       useEffect(() => {
-        (async () => {
-          try {
-            const tx = transcript.map(t => `${t.role === "ai" ? "SWAR" : "CAND"}: ${t.text}`).join("\n");
-            const r = await callClaude([{ role: "user", content: `Analyse for "${context.jd.title}". Transcript:\n${tx}\n\nReturn JSON: {"summary":"3 sentences","strengths":["s1","s2","s3"],"areas":["a1","a2","a3"],"tech":7,"comm":8,"rec":"Hire"}` }], "Return only JSON.", true);
-            if (r) setData(r); else setErr("Could not parse.");
-          } catch (e) { setErr(e.message); } finally { setBusy(false); }
-        })();
-      }, []);
+        setRemarks(initialRemarks || "");
+      }, [initialRemarks, selectedApplicationId]);
+
+      useEffect(() => {
+        const noTx = !transcript || !transcript.length;
+        if (noTx) {
+          setBusy(false);
+          setErr(null);
+          setData({
+            summary:
+              "No AI interview transcript is stored for this role yet. Complete or schedule a voice interview to generate automated scores. You can still record an HR decision below for this application.",
+            tech: null,
+            comm: null,
+            rec: "Pending review",
+            strengths: [],
+            areas: [],
+            noTranscript: true,
+            pendingManualGenerate: false,
+          });
+          return undefined;
+        }
+
+        if (savedAnalysisIsRenderable(savedAnalysis)) {
+          setBusy(false);
+          setErr(null);
+          setData({ ...normalizeSavedAnalysis(savedAnalysis), pendingManualGenerate: false });
+          return undefined;
+        }
+
+        if (!autoClaudeConsumedRef.current) {
+          autoClaudeConsumedRef.current = true;
+          let cancelled = false;
+          setBusy(true);
+          setErr(null);
+          setData(null);
+          (async () => {
+            try {
+              const r = await callClaude(analysisInterviewMessages(transcript, context.jd.title), "Return only JSON.", true);
+              if (!cancelled) {
+                if (r) setData({ ...r, noTranscript: false, pendingManualGenerate: false });
+                else setErr("Could not parse.");
+              }
+            } catch (e) {
+              if (!cancelled) setErr(e.message);
+            } finally {
+              if (!cancelled) setBusy(false);
+            }
+          })();
+          return () => { cancelled = true; };
+        }
+
+        setBusy(false);
+        setErr(null);
+        setData({
+          summary:
+            "AI summary has not been generated for this role yet. Use “Generate AI summary” below, or record your HR decision without it.",
+          tech: null,
+          comm: null,
+          rec: "Pending review",
+          strengths: [],
+          areas: [],
+          noTranscript: false,
+          pendingManualGenerate: true,
+        });
+        return undefined;
+      }, [JSON.stringify(transcript), context.jd.title, JSON.stringify(savedAnalysis), selectedApplicationId]);
+
+      const handleManualGenerate = async () => {
+        if (!transcript || !transcript.length) return;
+        setBusy(true);
+        setErr(null);
+        try {
+          const r = await callClaude(analysisInterviewMessages(transcript, context.jd.title), "Return only JSON.", true);
+          if (r) setData({ ...r, noTranscript: false, pendingManualGenerate: false });
+          else setErr("Could not parse.");
+        } catch (e) {
+          setErr(e.message);
+        } finally {
+          setBusy(false);
+        }
+      };
+
       if (busy) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><Spin label="Generating analysis…"/></div>;
-      if (!data) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-center p-8 bg-white rounded-2xl"><p className="text-red-500 mb-4 text-sm">{err}</p><button onClick={onBack} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">Back</button></div></div>;
-      const recC = { "Strong Hire": "bg-green-500", "Hire": "bg-blue-500", "Weak Hire": "bg-amber-500", "No Hire": "bg-red-500" };
+      if (!data) return <div className="min-h-screen bg-slate-50 flex items-center justify-center"><div className="text-center p-8 bg-white rounded-2xl"><p className="text-red-500 mb-4 text-sm">{err}</p><button type="button" onClick={handleManualGenerate} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl mr-2">Retry</button><button onClick={onBack} className="px-5 py-2 border border-slate-200 text-slate-600 font-bold rounded-xl">Back</button></div></div>;
+      const recC = { "Strong Hire": "bg-green-500", "Hire": "bg-blue-500", "Weak Hire": "bg-amber-500", "No Hire": "bg-red-500", "Pending review": "bg-slate-500" };
+      const decisionPayload = (() => {
+        const { pendingManualGenerate: _p, ...rest } = data;
+        return { ...rest, noTranscript: Boolean(data.noTranscript) };
+      })();
       return (
         <div className="min-h-screen bg-slate-50">
           <div className="bg-indigo-900 text-white px-6 py-8"><div className="max-w-4xl mx-auto flex items-start justify-between flex-wrap gap-3"><div><h2 className="text-3xl font-black mb-1">{context.candidateName}</h2><p className="text-indigo-200 text-sm">{context.jd.title}</p></div><div className="flex items-center gap-3"><span className={`px-4 py-2 rounded-xl text-white font-black text-sm ${recC[data.rec] || "bg-blue-500"}`}>{data.rec}</span><button onClick={onLogout} className="text-indigo-300 text-sm">Logout</button></div></div></div>
-          <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
-            <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-slate-400 uppercase mb-3">Summary</h3><p className="text-slate-700">{data.summary}</p></div>
-            <div className="grid grid-cols-2 gap-4">{[["Technical", data.tech, "#6366f1"], ["Communication", data.comm, "#14b8a6"]].map(([l, v, col]) => <div key={l} className="bg-white rounded-2xl border border-slate-100 p-5"><p className="text-xs font-bold text-slate-400 mb-3">{l}</p><div className="flex items-center gap-3"><div className="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${v * 10}%`, backgroundColor: col }}/></div><span className="font-black text-slate-800 text-lg">{v}/10</span></div></div>)}</div>
-            <div className="grid grid-cols-2 gap-6">
-              <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-green-600 uppercase mb-4">Strengths</h3><ul className="space-y-2">{(data.strengths || []).map((s, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-green-500 font-bold">•</span>{s}</li>)}</ul></div>
-              <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-amber-600 uppercase mb-4">Improvements</h3><ul className="space-y-2">{(data.areas || []).map((a, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-amber-500 font-bold">•</span>{a}</li>)}</ul></div>
+          {showRoleTabs ? (
+            <div className="max-w-4xl mx-auto px-6 pt-4 flex flex-wrap gap-2">
+              {tabs.map((t) => (
+                <button
+                  key={t.applicationId}
+                  type="button"
+                  onClick={() => onSelectApplication(t.applicationId)}
+                  className={`px-4 py-2 rounded-full text-sm font-bold border transition-colors ${selectedApplicationId === t.applicationId ? "bg-indigo-600 text-white border-indigo-600 shadow-md" : "bg-white text-slate-700 border-slate-200 hover:border-indigo-300"}`}
+                >
+                  {t.label}
+                </button>
+              ))}
             </div>
+          ) : null}
+          <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
+            {data.pendingManualGenerate ? (
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <p className="text-sm text-amber-950">No AI summary stored for this role yet. Generate one to populate scores and narrative (optional).</p>
+                <button type="button" onClick={handleManualGenerate} disabled={busy} className="px-4 py-2.5 bg-indigo-600 text-white font-bold rounded-xl whitespace-nowrap disabled:opacity-50 shrink-0">Generate AI summary</button>
+              </div>
+            ) : null}
+            {err ? <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-sm text-red-700">{err}</div> : null}
+            <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-slate-400 uppercase mb-3">Summary</h3><p className="text-slate-700">{data.summary}</p></div>
+            {data.tech != null && data.comm != null ? (
+              <div className="grid grid-cols-2 gap-4">{[["Technical", data.tech, "#6366f1"], ["Communication", data.comm, "#14b8a6"]].map(([l, v, col]) => <div key={l} className="bg-white rounded-2xl border border-slate-100 p-5"><p className="text-xs font-bold text-slate-400 mb-3">{l}</p><div className="flex items-center gap-3"><div className="flex-1 h-2.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full" style={{ width: `${v * 10}%`, backgroundColor: col }}/></div><span className="font-black text-slate-800 text-lg">{v}/10</span></div></div>)}</div>
+            ) : null}
+            {(data.strengths || []).length > 0 || (data.areas || []).length > 0 ? (
+              <div className="grid grid-cols-2 gap-6">
+                <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-green-600 uppercase mb-4">Strengths</h3><ul className="space-y-2">{(data.strengths || []).map((s, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-green-500 font-bold">•</span>{s}</li>)}</ul></div>
+                <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-amber-600 uppercase mb-4">Improvements</h3><ul className="space-y-2">{(data.areas || []).map((a, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-amber-500 font-bold">•</span>{a}</li>)}</ul></div>
+              </div>
+            ) : null}
             <div className="bg-white rounded-2xl border border-slate-100 p-6">
               <h3 className="text-xs font-black text-slate-400 uppercase mb-3">HR Decision</h3>
               <textarea rows={3} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Final remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
-              <div className="flex gap-3"><button onClick={() => onDecision("REJECTED", remarks, data)} className="flex-1 py-3 border-2 border-red-100 text-red-600 font-bold rounded-xl">Reject</button><button onClick={() => onDecision("SHORTLISTED", remarks, data)} className="flex-1 py-3 bg-green-600 text-white font-bold rounded-xl">Shortlist ✓</button></div>
+              <div className="flex gap-3"><button type="button" onClick={() => onDecision("REJECTED", remarks, decisionPayload)} className="flex-1 py-3 border-2 border-red-100 text-red-600 font-bold rounded-xl">Reject</button><button type="button" onClick={() => onDecision("SHORTLISTED", remarks, decisionPayload)} className="flex-1 py-3 bg-green-600 text-white font-bold rounded-xl">Shortlist ✓</button></div>
             </div>
-            <button onClick={onBack} className="w-full py-3 border border-slate-200 text-slate-500 font-bold rounded-xl">← Back</button>
+            <button type="button" onClick={onBack} className="w-full py-3 border border-slate-200 text-slate-500 font-bold rounded-xl">← Back</button>
           </div>
         </div>
       );
     }
 
-    function CandDash({ candidate, jobs, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected }) {
-      const job = jobs.find(j => j.id === candidate.jobId);
+    function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected, onSync }) {
+      const focusJobId = portalFocusJobId || candidate.jobId;
+      const jobIdsOrdered = (() => {
+        const out = [];
+        const seen = new Set();
+        for (const a of candidate.applicationHistory || []) {
+          if (a.jobId && !seen.has(a.jobId)) {
+            seen.add(a.jobId);
+            out.push(a.jobId);
+          }
+        }
+        if (candidate.jobId && !seen.has(candidate.jobId)) out.push(candidate.jobId);
+        return out;
+      })();
+      const job = jobs.find((j) => j.id === focusJobId);
+      const latestApp = job ? getLatestAppForJob(candidate.applicationHistory, focusJobId) : null;
+      const iv = job ? interviewEligibleForJob(candidate, focusJobId) : { ok: false };
+      const roleLab = focusJobId ? portalStatusLabel(candidate, focusJobId) : "—";
+      const hrNote =
+        (latestApp?.hrRemarks && String(latestApp.hrRemarks).trim()) ||
+        (focusJobId === candidate.jobId ? (candidate.remarks || "").trim() : "");
+      const [rrCode, setRrCode] = useState("TECH_NETWORK");
+      const [rrText, setRrText] = useState("");
+      const [rrBusy, setRrBusy] = useState(false);
+      const canRequestReattempt = latestApp ? applicationEligibleForTechnicalReattemptRequest(latestApp) : false;
+      const submitReattempt = async () => {
+        if (!latestApp?.applicationId) return;
+        setRrBusy(true);
+        try {
+          const r = await fetch("/api/voice-bot/reattempt-request", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({
+              applicationId: latestApp.applicationId,
+              candidateReasonCode: rrCode,
+              candidateReasonText: rrText.trim(),
+            }),
+          });
+          const j = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            window.alert(j.error || "Could not submit request");
+          } else {
+            window.alert("Request submitted. HR will review and you will be notified here when approved.");
+            setRrText("");
+            if (typeof onSync === "function") await onSync();
+          }
+        } finally {
+          setRrBusy(false);
+        }
+      };
+      const canInterviewBtn =
+        (roleLab === "SHORTLISTED" || roleLab === "APPLIED" || roleLab === "SCHEDULED") && iv.ok;
+      const showInterviewBlock =
+        (roleLab === "SHORTLISTED" || roleLab === "APPLIED" || roleLab === "SCHEDULED" || roleLab === "REATTMPT") && !iv.ok;
       return (
         <div className="min-h-screen bg-slate-50">
           <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
@@ -2047,19 +2762,71 @@
           </div>
           <div className="max-w-3xl mx-auto px-6 py-8">
             <div className="flex items-center gap-4 mb-5"><div className="w-16 h-16 bg-indigo-600 rounded-2xl flex items-center justify-center text-white text-2xl font-black">{candidate.name[0]}</div><div><h1 className="text-2xl font-black text-slate-900">{candidate.name}</h1><p className="text-slate-500 text-sm">{candidate.email}</p></div></div>
+            {jobIdsOrdered.length > 0 ? (
+              <div className="mb-4">
+                <p className="text-xs font-black text-slate-400 uppercase mb-2">Your applications</p>
+                <div className="flex flex-wrap gap-2">
+                  {jobIdsOrdered.map((jid) => {
+                    const j = jobs.find((x) => x.id === jid);
+                    const lab = portalStatusLabel(candidate, jid);
+                    const sel = jid === focusJobId;
+                    return (
+                      <button
+                        key={jid}
+                        type="button"
+                        onClick={() => typeof onPortalFocusJob === "function" && onPortalFocusJob(jid)}
+                        className={`inline-flex items-center gap-2 px-3 py-2 rounded-full border text-sm font-bold transition-all ${sel ? "bg-indigo-600 text-white border-indigo-600 shadow-md" : "bg-white text-slate-800 border-slate-200 hover:border-indigo-300"}`}
+                      >
+                        <span>{j?.title || jid}</span>
+                        <span className={`text-[10px] uppercase px-2 py-0.5 rounded-full ${SB[lab] || "bg-slate-100 text-slate-600"}`}>{lab}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
             {job ? (
               <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-4">
-                <p className="text-xs font-black text-slate-400 uppercase mb-3">Active Application</p>
-                <div className="flex items-start justify-between mb-4 flex-wrap gap-2"><div><h2 className="text-xl font-bold text-slate-900">{job.title}</h2><p className="text-slate-500 text-sm">{job.designation} · {job.location}</p></div><span className={`text-xs font-black uppercase px-3 py-1.5 rounded-lg ${SB[candidate.status] || "bg-slate-100"}`}>{candidate.status}</span></div>
-                {candidate.remarks && <div className="bg-slate-50 rounded-xl p-4 mb-4"><p className="text-xs font-bold text-slate-400 mb-1">HR Remarks</p><p className="text-slate-700 text-sm italic">"{candidate.remarks}"</p></div>}
-                {getLatestAppForJob(candidate.applicationHistory, candidate.jobId)?.interviewScheduledAt ? (
-                  <p className="text-xs font-bold text-teal-700 mb-3">📅 Scheduled: {fmtDateTime(getLatestAppForJob(candidate.applicationHistory, candidate.jobId).interviewScheduledAt)}</p>
+                <p className="text-xs font-black text-slate-400 uppercase mb-3">Selected role</p>
+                <div className="flex items-start justify-between mb-4 flex-wrap gap-2"><div><h2 className="text-xl font-bold text-slate-900">{job.title}</h2><p className="text-slate-500 text-sm">{job.designation} · {job.location}</p></div><span className={`text-xs font-black uppercase px-3 py-1.5 rounded-lg ${SB[roleLab] || "bg-slate-100"}`}>{roleLab}</span></div>
+                {hrNote ? (
+                  <div className="bg-slate-50 rounded-xl p-4 mb-4"><p className="text-xs font-bold text-slate-400 mb-1">HR Remarks</p><p className="text-slate-700 text-sm italic">&quot;{hrNote}&quot;</p></div>
                 ) : null}
-                {(candidate.status === "SHORTLISTED" || candidate.status === "APPLIED") && !(candidate.transcript && candidate.transcript.length > 0) ? (
-                  <button onClick={() => onInterview(candidate.id)} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">🎤 Start Voice Interview →</button>
+                {getLatestAppForJob(candidate.applicationHistory, focusJobId)?.interviewScheduledAt ? (
+                  <p className="text-xs font-bold text-teal-700 mb-3">📅 Scheduled: {fmtDateTime(getLatestAppForJob(candidate.applicationHistory, focusJobId).interviewScheduledAt)}</p>
                 ) : null}
-                {candidate.status === "INTERVIEWED" && <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-center"><p className="text-teal-700 font-bold text-sm">✓ Under Review</p></div>}
-                {candidate.status === "REJECTED" && <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center"><p className="text-red-700 font-bold text-sm">Not Selected</p></div>}
+                {latestApp?.interviewCompletionStatus === "incomplete_technical" ? (
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-3 text-xs text-amber-900">
+                    <p className="font-bold">Incomplete – technical / session issue</p>
+                    <p className="mt-1 text-amber-800">If the interview stopped due to network, mic, or device problems, you can request one reattempt after HR approves.</p>
+                  </div>
+                ) : null}
+                {latestApp?.reattemptRequestStatus === "pending" ? (
+                  <div className="bg-slate-100 border border-slate-200 rounded-xl p-3 mb-3 text-xs text-slate-700 font-semibold">✓ Under Review — reattempt request pending HR approval for this role.</div>
+                ) : null}
+                {latestApp?.reattemptRequestStatus === "approved" && latestApp?.interviewCompletionStatus === "not_started" ? (
+                  <div className="bg-green-50 border border-green-200 rounded-xl p-3 mb-3 text-xs text-green-800 font-semibold">HR approved a reattempt. You can start the interview again.</div>
+                ) : null}
+                {latestApp?.reattemptRequestStatus === "rejected" ? (
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-3 mb-3 text-xs text-red-800">Your last reattempt request was not approved for this role. You may submit a new request if your situation changed.</div>
+                ) : null}
+                {canRequestReattempt ? (
+                  <div className="bg-white border border-indigo-200 rounded-xl p-4 mb-3 space-y-2">
+                    <p className="text-xs font-black text-slate-500 uppercase">Request interview reattempt · this role</p>
+                    <select value={rrCode} onChange={(e) => setRrCode(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm">
+                      {CANDIDATE_REATTEMPT_REASONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <textarea value={rrText} onChange={(e) => setRrText(e.target.value)} rows={2} placeholder="Short details (optional)" className="w-full border rounded-lg px-3 py-2 text-sm resize-none" />
+                    <button type="button" disabled={rrBusy} onClick={submitReattempt} className="w-full py-2 bg-indigo-600 text-white text-sm font-bold rounded-lg disabled:bg-slate-300">{rrBusy ? "Sending…" : "Submit request to HR"}</button>
+                  </div>
+                ) : null}
+                {canInterviewBtn ? (
+                  <button type="button" onClick={() => onInterview(candidate.id)} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">🎤 Start Voice Interview →</button>
+                ) : showInterviewBlock ? (
+                  <p className="text-xs text-slate-500 mb-2">{iv.reason}</p>
+                ) : null}
+                {roleLab === "INTERVIEWED" && <div className="bg-teal-50 border border-teal-200 rounded-xl p-4 text-center mt-3"><p className="text-teal-700 font-bold text-sm">✓ Under Review</p></div>}
+                {roleLab === "REJECTED" && <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-center mt-3"><p className="text-red-700 font-bold text-sm">Not Selected — this role</p></div>}
               </div>
             ) : (
               <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 p-10 text-center mb-4"><p className="text-slate-400 mb-4">No active application.</p><button onClick={onApply} className="px-6 py-2.5 bg-indigo-600 text-white font-bold rounded-xl">Browse Jobs</button></div>
@@ -2096,7 +2863,11 @@
       const [loc, setLoc] = useState(() => ({ path: window.location.pathname, search: window.location.search }));
       const [role, setRole] = useState(null), [hrId, setHrId] = useState(null);
       const [activeId, setActiveId] = useState(null), [selJob, setSelJob] = useState(null), [pending, setPending] = useState([]);
+      const [analysisApplicationId, setAnalysisApplicationId] = useState(null);
+      const [analysisSessionId, setAnalysisSessionId] = useState(0);
+      const [portalFocusJobId, setPortalFocusJobId] = useState(null);
       const [jobs, setJobs] = useState([]), [candidates, setCandidates] = useState([]), [talentPool, setTalentPool] = useState([]), [auditLog, setAuditLog] = useState([]);
+      const [reattemptPendingCount, setReattemptPendingCount] = useState(0);
       const [meta, setMeta] = useState(null);
       const [storageReady, setStorageReady] = useState(false);
       const [canPersist, setCanPersist] = useState(false);
@@ -2115,6 +2886,23 @@
         window.addEventListener("popstate", onPop);
         return () => window.removeEventListener("popstate", onPop);
       }, []);
+
+      const refreshReattemptCount = async () => {
+        const tok = localStorage.getItem(LS_TOKEN);
+        if (!tok || localStorage.getItem(LS_ROLE) !== "hr") return;
+        try {
+          const r = await fetch("/api/admin/reattempt-pending-count", { headers: { Authorization: `Bearer ${tok}` } });
+          if (r.ok) {
+            const j = await r.json();
+            setReattemptPendingCount(j.count ?? 0);
+          }
+        } catch (_) {}
+      };
+      useEffect(() => {
+        refreshReattemptCount();
+        const id = setInterval(refreshReattemptCount, 60000);
+        return () => clearInterval(id);
+      }, [role, storageReady]);
 
       const syncStateFromServer = async () => {
         const jr = await fetch("/api/jobs", { headers: { ...authHeaders() } });
@@ -2139,6 +2927,7 @@
         setAuditLog(st.auditLog || []);
         setMeta(st.meta || jd.meta || null);
         setCanPersist(true);
+        refreshReattemptCount();
       };
 
       useEffect(() => {
@@ -2245,6 +3034,14 @@
 
       useEffect(() => {
         if (!storageReady) return;
+        void flushPendingAbandonQueue();
+        const onOnline = () => void flushPendingAbandonQueue();
+        window.addEventListener("online", onOnline);
+        return () => window.removeEventListener("online", onOnline);
+      }, [storageReady]);
+
+      useEffect(() => {
+        if (!storageReady) return;
         const rt = parsePath(loc.path, loc.search);
         if (step === "CV_ANALYSER") {
           if (rt.name === "cvAnalyser") return;
@@ -2312,6 +3109,20 @@
       }, [step, active, ivJid, latestAppIV?.applicationId]);
       const company = meta?.companyName || "Indira IVF";
       const jd = selJob ? { ...selJob, companyName: company } : { id: "default", title: "Open Role", description: "", companyName: company };
+      const analysisRoleRows = active ? hrAnalysisRoleRows(active) : [];
+      const analysisAppIds = analysisRoleRows.map((r) => r.applicationId).filter((id) => id != null);
+      const resolvedAnalysisApplicationId =
+        step === "ANALYSIS" && active
+          ? analysisAppIds.length > 0
+            ? analysisApplicationId != null && analysisAppIds.includes(analysisApplicationId)
+              ? analysisApplicationId
+              : analysisAppIds[0]
+            : null
+          : analysisApplicationId;
+      const analysisLegacyOk = Boolean(
+        active && analysisRoleRows.length === 0 && active.transcript && active.transcript.length > 0,
+      );
+      const analysisCanOpen = Boolean(active && (analysisRoleRows.length > 0 || analysisLegacyOk));
       const cmCooling = meta?.coolingMonths ?? 3;
       const maxCvMb = meta?.maxCvMb ?? 5;
 
@@ -2341,6 +3152,8 @@
         setHrId(null);
         setActiveId(null);
         setSelJob(null);
+        setAnalysisApplicationId(null);
+        setPortalFocusJobId(null);
         setCanPersist(false);
         setCandidates([]);
         setTalentPool([]);
@@ -2533,6 +3346,11 @@
               jobs={jobs}
               applicationHistory={active?.applicationHistory || []}
               onApply={handleJobBoardApply}
+              onReattemptPortal={(job) => {
+                setPortalFocusJobId(job.id);
+                navigate("/portal");
+                setStep("PORTAL");
+              }}
               onContinueInterview={(job) => {
                 setSelJob(job);
                 setStep("INTRO");
@@ -2573,20 +3391,93 @@
           )}
           {step === "HR" && (
             <HRBridge onLogout={logout}>
-              <HRDash candidates={candidates} jobs={jobs} talentPool={talentPool} auditLog={auditLog} onView={id => { setActiveId(id); setStep("CAND_DETAIL"); }} onInterview={id => { setActiveId(id); setStep("INTRO"); }} onAnalysis={id => { setActiveId(id); setStep("ANALYSIS"); }} onCvAnalyser={() => { navigate("/cv-analyser"); setStep("CV_ANALYSER"); }} onJobs={() => setStep("JOBMASTER")} onScreen={() => setStep("SCREEN")} onTalentPool={() => setStep("TP_BROWSE")} onAuditLog={() => setStep("AUDIT")} onLogout={logout}/>
+              <HRDash candidates={candidates} jobs={jobs} talentPool={talentPool} auditLog={auditLog} reattemptPendingCount={reattemptPendingCount} onView={id => { setActiveId(id); setStep("CAND_DETAIL"); }} onInterview={id => { setActiveId(id); const cand = candidates.find(c => c.id === id); const j = cand && jobs.find(x => x.id === cand.jobId); if (j) setSelJob(j); setStep("INTRO"); }} onAnalysis={id => { setActiveId(id); setAnalysisApplicationId(null); setAnalysisSessionId((x) => x + 1); setStep("ANALYSIS"); }} onCvAnalyser={() => { navigate("/cv-analyser"); setStep("CV_ANALYSER"); }} onJobs={() => setStep("JOBMASTER")} onScreen={() => setStep("SCREEN")} onTalentPool={() => setStep("TP_BROWSE")} onAuditLog={() => setStep("AUDIT")} onReattempts={() => setStep("REATTEMPT")} onLogout={logout}/>
             </HRBridge>
           )}
-          {step === "CAND_DETAIL" && active && <CandidateDetail candidate={active} jobs={jobs} onUpdate={upd} onInterview={() => setStep("INTRO")} onAnalysis={() => setStep("ANALYSIS")} onBack={() => setStep("HR")}/>}
+          {step === "CAND_DETAIL" && active && <CandidateDetail candidate={active} jobs={jobs} onUpdate={upd} onInterview={(jobId) => { const j = jobs.find(x => x.id === (jobId || active.jobId)); if (j) setSelJob(j); setStep("INTRO"); }} onAnalysis={(appId) => { setAnalysisApplicationId(appId ?? null); setAnalysisSessionId((x) => x + 1); setStep("ANALYSIS"); }} onBack={() => setStep("HR")}/>}
           {step === "JOBMASTER" && <JobMaster jobs={jobs} onSave={setJobs} onBack={() => setStep("HR")}/>}
           {step === "SCREEN" && <Screening candidates={candidates} jobs={jobs} onShortlist={u => { setCandidates(u); setStep("HR"); }} onBack={() => setStep("HR")}/>}
           {step === "TP_BROWSE" && <TalentPoolBrowse talentPool={talentPool} jobs={jobs} candidates={candidates} onMapToJob={handleTalentPoolMap} onLogAudit={logAudit} onBack={() => setStep("HR")} coolingMonths={cmCooling}/>}
+          {step === "REATTEMPT" && (
+            <HRBridge onLogout={logout}>
+              <ReattemptQueue onBack={() => { setStep("HR"); refreshReattemptCount(); }} onResolved={async () => { await syncStateFromServer(); await refreshReattemptCount(); }} />
+            </HRBridge>
+          )}
           {step === "AUDIT" && <AuditLogView auditLog={auditLog} onBack={() => setStep("HR")}/>}
           {step === "CV_ANALYSER" && (
             <HRBridge onLogout={logout}>
               <CVAnalyserPage onBack={() => { navigate("/hr"); setStep("HR"); }} onSynced={syncStateFromServer} />
             </HRBridge>
           )}
-          {step === "ANALYSIS" && active?.transcript && <Analysis context={{ jd, candidateName: active.name, language: active.lang || "English" }} transcript={active.transcript} onDecision={(s, r, a) => { upd({ status: s, remarks: r, analysis: a }); setStep("HR"); }} onBack={() => setStep("HR")} onLogout={logout}/>}
+          {step === "ANALYSIS" && analysisCanOpen && active && (
+            <Analysis
+              key={`hr-analysis-${analysisSessionId}`}
+              context={{
+                jd: (() => {
+                  if (analysisRoleRows.length > 0 && resolvedAnalysisApplicationId != null) {
+                    const row = active.applicationHistory.find((x) => x.applicationId === resolvedAnalysisApplicationId);
+                    const jj = row && jobs.find((x) => x.id === row.jobId);
+                    return jj ? { ...jj, companyName: company } : { id: "default", title: "Open Role", description: "", companyName: company };
+                  }
+                  const lj = jobs.find((x) => x.id === active.jobId);
+                  return lj ? { ...lj, companyName: company } : { id: "default", title: "Open Role", description: "", companyName: company };
+                })(),
+                candidateName: active.name,
+                language: active.lang || "English",
+              }}
+              transcript={
+                analysisRoleRows.length > 0 && resolvedAnalysisApplicationId != null
+                  ? (transcriptLinesForApplication(active, resolvedAnalysisApplicationId) || [])
+                  : (active.transcript || [])
+              }
+              savedAnalysis={(() => {
+                if (resolvedAnalysisApplicationId == null) return active.analysis;
+                const row = (active.applicationHistory || []).find((x) => x.applicationId === resolvedAnalysisApplicationId);
+                return row?.analysis != null ? row.analysis : active.analysis;
+              })()}
+              roleTabs={analysisRoleRows.map((row) => ({
+                applicationId: row.applicationId,
+                label: jobs.find((j) => j.id === row.jobId)?.title || row.jobId || "Role",
+              }))}
+              selectedApplicationId={resolvedAnalysisApplicationId}
+              onSelectApplication={setAnalysisApplicationId}
+              initialRemarks={(() => {
+                if (resolvedAnalysisApplicationId == null) return active.remarks || "";
+                const row = (active.applicationHistory || []).find((x) => x.applicationId === resolvedAnalysisApplicationId);
+                return row?.hrRemarks != null ? String(row.hrRemarks) : "";
+              })()}
+              onDecision={(s, r, a) => {
+                const analysisToSave =
+                  a && typeof a === "object"
+                    ? {
+                        summary: a.summary || "",
+                        tech: a.tech != null ? a.tech : 0,
+                        comm: a.comm != null ? a.comm : 0,
+                        rec: a.rec || "",
+                        strengths: a.strengths || [],
+                        areas: a.areas || [],
+                      }
+                    : a;
+                if (resolvedAnalysisApplicationId != null && analysisRoleRows.length > 0) {
+                  upd({
+                    applicationHistory: patchApplicationById(active.applicationHistory, resolvedAnalysisApplicationId, {
+                      hrRemarks: r,
+                      hrDecisionStatus: s,
+                      analysis: analysisToSave,
+                    }),
+                    status: s,
+                    remarks: r,
+                    analysis: analysisToSave,
+                  });
+                } else {
+                  upd({ status: s, remarks: r, analysis: analysisToSave });
+                }
+                setStep("HR");
+              }}
+              onBack={() => setStep("HR")}
+              onLogout={logout}
+            />
+          )}
           {step === "CVUP" && selJob && <CVUpload jobTitle={selJob.title} maxCvMb={maxCvMb} onComplete={handleCVUploaded} onBack={() => { navigate("/"); setStep("HOME"); setSelJob(null); }}/>}
           {step === "TP_SUBMIT" && <TalentPoolSubmit candidate={active} maxCvMb={maxCvMb} coolingMonths={cmCooling} onSubmit={(entry) => setTalentPool(p => [...p, entry])} onBack={() => {
             if (tpFromPortal) { navigate("/portal"); setStep("PORTAL"); }
@@ -2597,6 +3488,12 @@
               candidate={active}
               job={selJob || jobs.find(j => j.id === active?.jobId)}
               bypassSchedule={role === "hr"}
+              eligibilityBlock={role === "hr" ? null : (() => {
+                const j = selJob || jobs.find((x) => x.id === active?.jobId);
+                if (!j?.id) return null;
+                const e = interviewEligibleForJob(active, j.id);
+                return e.ok ? null : e.reason;
+              })()}
               interviewScheduledAt={getLatestAppForJob(active.applicationHistory, selJob?.id || active?.jobId)?.interviewScheduledAt}
               onSchedule={(iso) => {
                 const jid = selJob?.id || active?.jobId;
@@ -2604,7 +3501,18 @@
                 upd({ applicationHistory: patchLatestApp(active.applicationHistory, jid, { interviewScheduledAt: iso }) });
               }}
               onLogout={logout}
-              onStart={lang => { upd({ lang }); setStep("INTERVIEW"); }}
+              onStart={(lang) => {
+                const j = selJob || jobs.find((x) => x.id === active?.jobId);
+                if (j?.id && role !== "hr") {
+                  const e = interviewEligibleForJob(active, j.id);
+                  if (!e.ok) {
+                    window.alert(e.reason || "Interview cannot start.");
+                    return;
+                  }
+                }
+                upd({ lang });
+                setStep("INTERVIEW");
+              }}
               onBack={() => {
                 if (role === "hr") setStep("HR");
                 else {
@@ -2615,10 +3523,27 @@
               }}
             />
           )}
-          {step === "INTERVIEW" && active && <Interview context={{ jd, candidateName: active.name, language: active.lang || "English" }} applicationId={resolvedApplicationId} onEnd={t => {
+          {step === "INTERVIEW" && active && <Interview context={{ jd, candidateName: active.name, language: active.lang || "English" }} applicationId={resolvedApplicationId} onAbandon={async (detail) => {
+            const aid = resolvedApplicationId;
+            if (aid) await postInterviewAbandonWithFallback(aid, detail);
+            try { await syncStateFromServer(); } catch (_) {}
+            setStep(role === "hr" ? "HR" : "PORTAL");
+          }} onEnd={t => {
+            if (!t || !t.length) {
+              syncStateFromServer().catch(() => {});
+              setStep(role === "hr" ? "HR" : "PORTAL");
+              return;
+            }
             const jid = selJob?.id || active?.jobId;
             let nextHist = active.applicationHistory;
-            if (jid) nextHist = patchLatestApp(active.applicationHistory, jid, { interviewCompletedAt: new Date().toISOString() });
+            if (jid) {
+              nextHist = patchLatestApp(active.applicationHistory, jid, {
+                interviewCompletedAt: new Date().toISOString(),
+                transcript: t,
+                interviewCompletionStatus: "completed",
+                reattemptRequestStatus: "none",
+              });
+            }
             upd({ transcript: t, status: "INTERVIEWED", applicationHistory: nextHist });
             setStep("DONE");
           }}/>}
@@ -2630,7 +3555,7 @@
               else { navigate("/portal"); setStep("PORTAL"); }
             }
           }}/>}
-          {step === "PORTAL" && active && <CandDash candidate={active} jobs={jobs} onApply={() => { navigate("/"); setStep("HOME"); }} onTalentPool={() => { setTpFromPortal(true); setStep("TP_SUBMIT"); }} onInterview={id => { setActiveId(id); setStep("INTRO"); }} onRights={() => setStep("RIGHTS")} onLogout={logout} talentPoolSelected={true}/>}
+          {step === "PORTAL" && active && <CandDash candidate={active} jobs={jobs} portalFocusJobId={portalFocusJobId} onPortalFocusJob={setPortalFocusJobId} onApply={() => { navigate("/"); setStep("HOME"); }} onTalentPool={() => { setTpFromPortal(true); setStep("TP_SUBMIT"); }} onInterview={() => { const jid = portalFocusJobId || active.jobId; const j = jobs.find(x => x.id === jid); if (j) setSelJob(j); setStep("INTRO"); }} onRights={() => setStep("RIGHTS")} onLogout={logout} talentPoolSelected={true} onSync={syncStateFromServer}/>}
           {step === "RIGHTS" && active && <RightsPanel candidate={active} jobs={jobs} dpo={meta?.dpo} onUpdate={upd} onErase={() => {
             setCandidates(p => p.filter(c => c.id !== activeId));
             setActiveId(null);
