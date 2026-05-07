@@ -160,7 +160,10 @@ CREATE TABLE talent_pool_entry (
   current_employer VARCHAR(255),
   source VARCHAR(128),
   application_date DATE,
-  cooling_period VARCHAR(255)
+  cooling_period VARCHAR(255),
+  preferred_city_1 VARCHAR(255),
+  preferred_city_2 VARCHAR(255),
+  preferred_city_3 VARCHAR(255)
 );
 
 CREATE TABLE talent_pool_desired_role (

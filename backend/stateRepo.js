@@ -358,17 +358,30 @@ async function loadOneCandidate(client, id) {
 
 async function loadTalentPool(client) {
   let entries;
+  let hasPreferredCities = true;
   try {
     entries = await client.query(
       `SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-              qualification, current_ctc, current_employer, source, application_date, cooling_period
+              qualification, current_ctc, current_employer, source, application_date, cooling_period,
+              preferred_city_1, preferred_city_2, preferred_city_3
        FROM talent_pool_entry ORDER BY submitted_at DESC`,
     );
   } catch (e) {
     if (e.code === "42703") {
-      entries = await client.query(
-        "SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged FROM talent_pool_entry ORDER BY submitted_at DESC",
-      );
+      hasPreferredCities = false;
+      try {
+        entries = await client.query(
+          `SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+                  qualification, current_ctc, current_employer, source, application_date, cooling_period
+           FROM talent_pool_entry ORDER BY submitted_at DESC`,
+        );
+      } catch (e2) {
+        if (e2.code === "42703") {
+          entries = await client.query(
+            "SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged FROM talent_pool_entry ORDER BY submitted_at DESC",
+          );
+        } else throw e2;
+      }
     } else throw e;
   }
   const out = [];
@@ -421,6 +434,18 @@ async function loadTalentPool(client) {
           ? new Date(e.application_date).toISOString().slice(0, 10)
           : "",
       coolingPeriod: e.cooling_period != null ? String(e.cooling_period) : "",
+      preferredCity1:
+        hasPreferredCities && e.preferred_city_1 != null
+          ? String(e.preferred_city_1)
+          : "",
+      preferredCity2:
+        hasPreferredCities && e.preferred_city_2 != null
+          ? String(e.preferred_city_2)
+          : "",
+      preferredCity3:
+        hasPreferredCities && e.preferred_city_3 != null
+          ? String(e.preferred_city_3)
+          : "",
       cvText: e.cv_text || "",
       submittedAt: new Date(e.submitted_at).toISOString(),
       cvFile,
@@ -780,8 +805,9 @@ async function saveAppState(pool, body) {
         await client.query(
           `INSERT INTO talent_pool_entry (
              id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-             qualification, current_ctc, current_employer, source, application_date, cooling_period
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+             qualification, current_ctc, current_employer, source, application_date, cooling_period,
+             preferred_city_1, preferred_city_2, preferred_city_3
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
           [
             t.id,
             t.candidateId || null,
@@ -800,27 +826,60 @@ async function saveAppState(pool, body) {
             t.source != null ? String(t.source).slice(0, 128) : null,
             appDate,
             t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+            t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
+            t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
+            t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
           ],
         );
       } catch (e) {
         if (e.code === "42703") {
-          await client.query(
-            `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-            [
-              t.id,
-              t.candidateId || null,
-              t.name,
-              t.email,
-              t.phone || "",
-              t.experience ?? 0,
-              t.location || "",
-              t.keywords || "",
-              t.cvText || "",
-              new Date(t.submittedAt),
-              true,
-            ],
-          );
+          try {
+            await client.query(
+              `INSERT INTO talent_pool_entry (
+                 id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+                 qualification, current_ctc, current_employer, source, application_date, cooling_period
+               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+              [
+                t.id,
+                t.candidateId || null,
+                t.name,
+                t.email,
+                t.phone || "",
+                t.experience ?? 0,
+                t.location || "",
+                t.keywords || "",
+                t.cvText || "",
+                new Date(t.submittedAt),
+                true,
+                t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+                t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+                t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+                t.source != null ? String(t.source).slice(0, 128) : null,
+                appDate,
+                t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+              ],
+            );
+          } catch (e2) {
+            if (e2.code === "42703") {
+              await client.query(
+                `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                [
+                  t.id,
+                  t.candidateId || null,
+                  t.name,
+                  t.email,
+                  t.phone || "",
+                  t.experience ?? 0,
+                  t.location || "",
+                  t.keywords || "",
+                  t.cvText || "",
+                  new Date(t.submittedAt),
+                  true,
+                ],
+              );
+            } else throw e2;
+          }
         } else throw e;
       }
       for (const dr of t.desiredRoles || []) {

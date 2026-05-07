@@ -81,6 +81,14 @@
       { value: "Recruitment Consultant", label: "Recruitment Consultant" },
     ];
 
+    const TALENT_POOL_NOTICE_PERIOD_OPTIONS = ["15 days", "30 days", "45 days", "60 days", "90 days"];
+
+    function resolveTalentPoolCityPick(city, other) {
+      if (!city) return "";
+      if (city === "__OTHER__") return (other || "").trim();
+      return city;
+    }
+
     const INDIAN_CITIES_FALLBACK = [
       "Agartala", "Agra", "Ahmedabad", "Aizawl", "Ajmer", "Akola", "Aligarh", "Allahabad", "Ambala", "Amravati", "Amritsar", "Asansol", "Aurangabad",
       "Bangalore", "Bareilly", "Belgaum", "Bhopal", "Bhubaneswar", "Bikaner", "Bilaspur", "Bokaro", "Chandigarh", "Chennai", "Coimbatore", "Cuttack",
@@ -811,6 +819,15 @@
                 <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
                   <h3 className="font-black text-slate-900 mb-2">Resolve reattempt</h3>
                   <p className="text-sm text-slate-600 mb-4">{sel.candidateName} · {sel.jobTitle}</p>
+                  {sel.candidateReasonCode ? (
+                    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 mb-4">
+                      <p className="text-xs font-bold text-slate-500 uppercase mb-1.5">Candidate request</p>
+                      <p className="text-sm text-slate-800 leading-snug">
+                        Candidate: {sel.candidateReasonCode}
+                        {sel.candidateReasonText ? ` — ${String(sel.candidateReasonText).trim()}` : ""}
+                      </p>
+                    </div>
+                  ) : null}
                   <label className="block text-xs font-bold text-slate-500 mb-1">Decision</label>
                   <select value={decision} onChange={(e) => setDecision(e.target.value)} className="w-full border rounded-xl px-3 py-2 mb-3 text-sm">
                     <option value="approve">Approve (clears prior answers &amp; transcript for this application)</option>
@@ -1224,8 +1241,8 @@
       );
     }
 
-    function CandReg({ onRegister, onBack }) {
-      const [f, setF] = useState({ name: "", email: "", password: "" });
+    function CandReg({ onRegister, onBack, initialName = "", initialEmail = "" }) {
+      const [f, setF] = useState({ name: initialName || "", email: initialEmail || "", password: "" });
       return (
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-md">
@@ -1489,8 +1506,7 @@
       );
     }
 
-    function TalentPoolSubmit({ candidate, onSubmit, onBack, maxCvMb, coolingMonths }) {
-      const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
+    function TalentPoolSubmit({ candidate, onSubmit, onGuestContinue, guestMode, onBack, maxCvMb, coolingMonths }) {
       const todayIso = () => new Date().toISOString().slice(0, 10);
       const [form, setForm] = useState({
         name: candidate?.name || "",
@@ -1508,6 +1524,12 @@
         source: "",
         applicationDate: todayIso(),
         coolingPeriod: "",
+        pref1City: "",
+        pref1Other: "",
+        pref2City: "",
+        pref2Other: "",
+        pref3City: "",
+        pref3Other: "",
       });
       const [cityList, setCityList] = useState(() => [...INDIAN_CITIES_FALLBACK].sort((a, b) => a.localeCompare(b)));
       const [file, setFile] = useState(null), [error, setError] = useState(""), [processing, setProcessing] = useState(false), [ack, setAck] = useState(false), [done, setDone] = useState(false), [formErr, setFormErr] = useState("");
@@ -1533,9 +1555,18 @@
         setFormErr("");
         if (!form.name.trim() || !form.email.trim() || !file || !ack) return;
         if (!form.source) { setFormErr("Please select how you heard about us (Source)."); return; }
-        if (!form.locationCity) { setFormErr("Please select your city (or Other)."); return; }
+        if (!form.locationCity) { setFormErr("Please select your current city (or Other)."); return; }
         if (form.locationCity === "__OTHER__" && !(form.locationOther || "").trim()) { setFormErr("Please type your city when you select Other."); return; }
-        onSubmit({
+        for (const [ci, oi] of [["pref1City", "pref1Other"], ["pref2City", "pref2Other"], ["pref3City", "pref3Other"]]) {
+          if (form[ci] === "__OTHER__" && !(form[oi] || "").trim()) {
+            setFormErr("Please type the city when you select Other for preferred cities.");
+            return;
+          }
+        }
+        const p1 = resolveTalentPoolCityPick(form.pref1City, form.pref1Other);
+        const p2 = resolveTalentPoolCityPick(form.pref2City, form.pref2Other);
+        const p3 = resolveTalentPoolCityPick(form.pref3City, form.pref3Other);
+        const entry = {
           id: "TP-" + Date.now(), candidateId: candidate?.id || null,
           name: form.name.trim(), email: form.email.trim().toLowerCase(), phone: form.phone.trim(),
           desiredRoles: form.desiredRoles.split(",").map(s => s.trim()).filter(Boolean),
@@ -1547,10 +1578,18 @@
           currentEmployer: form.currentEmployer.trim(),
           source: form.source,
           applicationDate: form.applicationDate || todayIso(),
-          coolingPeriod: form.coolingPeriod.trim(),
+          coolingPeriod: (form.coolingPeriod || "").trim(),
+          preferredCity1: p1,
+          preferredCity2: p2,
+          preferredCity3: p3,
           keywords: form.keywords.trim(),
           cvText: file.cvText, cvFile: file, submittedAt: new Date().toISOString(), mappedToJobs: []
-        });
+        };
+        if (guestMode && typeof onGuestContinue === "function") {
+          onGuestContinue(entry);
+          return;
+        }
+        onSubmit(entry);
         setDone(true);
       };
       if (done) return (
@@ -1572,16 +1611,37 @@
             <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
               {[["Full Name *", "name", "text"], ["Email *", "email", "email"], ["Phone", "phone", "tel"]].map(([l, k, t]) => <div key={k}><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{l}</label><input type={t} value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"/></div>)}
               <div>
-                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">City (India) *</label>
-                <select value={form.locationCity} onChange={e => setForm(p => ({ ...p, locationCity: e.target.value, locationOther: e.target.value === "__OTHER__" ? p.locationOther : "" }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400 bg-white">
-                  <option value="">— Select city —</option>
-                  {cityList.map((city) => <option key={city} value={city}>{city}</option>)}
-                  <option value="__OTHER__">Other (type below)</option>
-                </select>
-                {form.locationCity === "__OTHER__" ? (
-                  <input type="text" value={form.locationOther} onChange={e => setForm(p => ({ ...p, locationOther: e.target.value }))} placeholder="Type your city" className="w-full mt-2 px-4 py-2.5 border border-indigo-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400" />
-                ) : null}
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current city *</label>
+                <div className="flex flex-col sm:flex-row gap-2 items-stretch">
+                  <select value={form.locationCity} onChange={e => setForm(p => ({ ...p, locationCity: e.target.value, locationOther: e.target.value === "__OTHER__" ? p.locationOther : "" }))} className="flex-1 min-w-0 px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400 bg-white">
+                    <option value="">— Select city —</option>
+                    {cityList.map((city) => <option key={city} value={city}>{city}</option>)}
+                    <option value="__OTHER__">Other</option>
+                  </select>
+                  {form.locationCity === "__OTHER__" ? (
+                    <input type="text" value={form.locationOther} onChange={e => setForm(p => ({ ...p, locationOther: e.target.value }))} placeholder="Type city" className="flex-1 min-w-0 px-4 py-2.5 border border-indigo-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400" />
+                  ) : null}
+                </div>
               </div>
+              {[1, 2, 3].map((n) => {
+                const ck = `pref${n}City`;
+                const ok = `pref${n}Other`;
+                return (
+                  <div key={n}>
+                    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Preferred city {n} <span className="text-slate-400 normal-case font-normal"></span></label>
+                    <div className="flex flex-col sm:flex-row gap-2 items-stretch">
+                      <select value={form[ck]} onChange={e => setForm(p => ({ ...p, [ck]: e.target.value, [ok]: e.target.value === "__OTHER__" ? p[ok] : "" }))} className="flex-1 min-w-0 px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400 bg-white">
+                        <option value="">— Select city —</option>
+                        {cityList.map((city) => <option key={city} value={city}>{city}</option>)}
+                        <option value="__OTHER__">Other</option>
+                      </select>
+                      {form[ck] === "__OTHER__" ? (
+                        <input type="text" value={form[ok]} onChange={e => setForm(p => ({ ...p, [ok]: e.target.value }))} placeholder="Type city" className="flex-1 min-w-0 px-4 py-2.5 border border-indigo-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400" />
+                      ) : null}
+                    </div>
+                  </div>
+                );
+              })}
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Qualification</label><input value={form.qualification} onChange={e => setForm(p => ({ ...p, qualification: e.target.value }))} placeholder="e.g. MBBS, MBA, B.Tech" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current CTC</label><input value={form.currentCtc} onChange={e => setForm(p => ({ ...p, currentCtc: e.target.value }))} placeholder="e.g. 12 LPA" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
@@ -1595,7 +1655,13 @@
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Date of application</label><input type="date" value={form.applicationDate} onChange={e => setForm(p => ({ ...p, applicationDate: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
-                <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Cooling period</label><input value={form.coolingPeriod} onChange={e => setForm(p => ({ ...p, coolingPeriod: e.target.value }))} placeholder={`e.g. ${cm} months (org policy) or eligible after…`} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Notice period</label>
+                  <select value={form.coolingPeriod} onChange={e => setForm(p => ({ ...p, coolingPeriod: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm bg-white focus:outline-none focus:border-indigo-400">
+                    <option value="">— Select —</option>
+                    {TALENT_POOL_NOTICE_PERIOD_OPTIONS.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+                  </select>
+                </div>
               </div>
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Years of Experience</label><input type="number" min="0" value={form.experience} onChange={e => setForm(p => ({ ...p, experience: e.target.value }))} placeholder="0" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
               <div><label className="block text-xs font-bold text-slate-500 uppercase mb-1">Desired Roles <span className="text-slate-400 normal-case font-normal">(comma-separated)</span></label><input value={form.desiredRoles} onChange={e => setForm(p => ({ ...p, desiredRoles: e.target.value }))} placeholder="e.g. Senior Embryologist" className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm"/></div>
@@ -1741,7 +1807,7 @@
         if (filters.location && !(t.location || "").toLowerCase().includes(filters.location.toLowerCase())) return false;
         if (filters.source && (t.source || "") !== filters.source) return false;
         if (filters.keyword) {
-          const all = `${t.name} ${t.email} ${t.keywords} ${t.cvText} ${t.qualification || ""} ${t.currentCtc || ""} ${t.currentEmployer || ""} ${t.source || ""} ${t.coolingPeriod || ""} ${t.applicationDate || ""} ${(t.skills || []).join(" ")} ${(t.desiredRoles || []).join(" ")}`.toLowerCase();
+          const all = `${t.name} ${t.email} ${t.keywords} ${t.cvText} ${t.qualification || ""} ${t.currentCtc || ""} ${t.currentEmployer || ""} ${t.source || ""} ${t.coolingPeriod || ""} ${t.applicationDate || ""} ${(t.skills || []).join(" ")} ${(t.desiredRoles || []).join(" ")} ${t.preferredCity1 || ""} ${t.preferredCity2 || ""} ${t.preferredCity3 || ""}`.toLowerCase();
           if (!all.includes(filters.keyword.toLowerCase())) return false;
         }
         if (filters.fromDate && new Date(t.submittedAt) < new Date(filters.fromDate)) return false;
@@ -1794,7 +1860,10 @@
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   {selected.phone && <div><p className="text-xs text-slate-400 font-bold">Phone</p><p>{selected.phone}</p></div>}
                   <div><p className="text-xs text-slate-400 font-bold">Email</p><p>{selected.email}</p></div>
-                  {selected.location && <div><p className="text-xs text-slate-400 font-bold">Location</p><p>{selected.location}</p></div>}
+                  {selected.location && <div><p className="text-xs text-slate-400 font-bold">Current city</p><p>{selected.location}</p></div>}
+                  {selected.preferredCity1 && <div><p className="text-xs text-slate-400 font-bold">Preferred city 1</p><p>{selected.preferredCity1}</p></div>}
+                  {selected.preferredCity2 && <div><p className="text-xs text-slate-400 font-bold">Preferred city 2</p><p>{selected.preferredCity2}</p></div>}
+                  {selected.preferredCity3 && <div><p className="text-xs text-slate-400 font-bold">Preferred city 3</p><p>{selected.preferredCity3}</p></div>}
                   <div><p className="text-xs text-slate-400 font-bold">Experience</p><p>{selected.experience} yrs</p></div>
                   <div><p className="text-xs text-slate-400 font-bold">Submitted</p><p>{fmtDate(selected.submittedAt)}</p></div>
                   {selected.qualification && <div><p className="text-xs text-slate-400 font-bold">Qualification</p><p>{selected.qualification}</p></div>}
@@ -1802,7 +1871,7 @@
                   {selected.currentEmployer && <div className="col-span-2"><p className="text-xs text-slate-400 font-bold">Current employer</p><p>{selected.currentEmployer}</p></div>}
                   {selected.source && <div><p className="text-xs text-slate-400 font-bold">Source</p><p>{selected.source}</p></div>}
                   {selected.applicationDate && <div><p className="text-xs text-slate-400 font-bold">Application date</p><p>{selected.applicationDate}</p></div>}
-                  {selected.coolingPeriod && <div className="col-span-2"><p className="text-xs text-slate-400 font-bold">Cooling period</p><p>{selected.coolingPeriod}</p></div>}
+                  {selected.coolingPeriod && <div className="col-span-2"><p className="text-xs text-slate-400 font-bold">Notice period</p><p>{selected.coolingPeriod}</p></div>}
                 </div>
                 {selected.desiredRoles?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Desired Roles</p><div className="flex gap-1 flex-wrap">{selected.desiredRoles.map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg">{r}</span>)}</div></div>}
                 {selected.skills?.length > 0 && <div><p className="text-xs text-slate-400 font-bold mb-2">Skills</p><div className="flex gap-1 flex-wrap">{selected.skills.map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-1 rounded-lg">{s}</span>)}</div></div>}
@@ -1844,7 +1913,7 @@
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">{filtered.map(t => (
                 <div key={t.id} className="bg-white rounded-2xl border border-slate-200 p-5 hover:shadow-lg hover:border-indigo-200 transition-all">
                   <div className="flex items-start justify-between mb-3"><div className="flex items-center gap-3"><div className="w-11 h-11 rounded-xl bg-indigo-50 flex items-center justify-center text-indigo-600 font-black text-lg">{t.name[0]}</div><div><p className="font-bold text-slate-900">{t.name}</p><p className="text-xs text-slate-400">{t.email}</p></div></div><span className="text-xs font-bold text-slate-500 bg-slate-50 px-2 py-1 rounded-lg">{fmtDate(t.submittedAt)}</span></div>
-                  <div className="flex gap-3 text-xs text-slate-600 mb-3 flex-wrap">{t.location && <p>📍 {t.location}</p>}{t.source ? <p className="text-indigo-700 font-semibold">{TP_SOURCE_OPTIONS.find(o => o.value === t.source)?.label || t.source}</p> : null}<p>💼 {t.experience} yrs</p><p>{fileIcon(t.cvFile.ext)} {t.cvFile.ext.toUpperCase()}</p></div>
+                  <div className="flex gap-3 text-xs text-slate-600 mb-3 flex-wrap">{t.location && <p>📍 {t.location}</p>}{[t.preferredCity1, t.preferredCity2, t.preferredCity3].filter(Boolean).length > 0 ? <p className="text-violet-700 font-medium">Pref: {[t.preferredCity1, t.preferredCity2, t.preferredCity3].filter(Boolean).join(" · ")}</p> : null}{t.source ? <p className="text-indigo-700 font-semibold">{TP_SOURCE_OPTIONS.find(o => o.value === t.source)?.label || t.source}</p> : null}<p>💼 {t.experience} yrs</p><p>{fileIcon(t.cvFile.ext)} {t.cvFile.ext.toUpperCase()}</p></div>
                   {t.desiredRoles?.length > 0 && <div className="flex gap-1 flex-wrap mb-2">{t.desiredRoles.slice(0, 3).map(r => <span key={r} className="text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-lg">{r}</span>)}</div>}
                   {t.skills?.length > 0 && <div className="flex gap-1 flex-wrap mb-3">{t.skills.slice(0, 4).map(s => <span key={s} className="text-xs bg-slate-100 text-slate-700 px-2 py-0.5 rounded-lg">{s}</span>)}</div>}
                   <div className="flex gap-2 pt-3 border-t border-slate-100">
@@ -2209,7 +2278,7 @@
             <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Language</label>
             <select value={lang} onChange={e => setLang(e.target.value)} className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white mb-5">{["English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada", "Marathi", "Gujarati", "Malayalam"].map(l => <option key={l} value={l}>{l}</option>)}</select>
             {eligibilityBlock ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/40 border border-amber-800/50 rounded-lg p-3">{eligibilityBlock}</p> : null}
-            {slot.hasSlot && slot.tooEarly ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time). You then have {INTERVIEW_START_GRACE_MINUTES} minutes to begin.</p> : null}
+            {slot.hasSlot && slot.tooEarly ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time).</p> : null}
             {slot.hasSlot && slot.tooLate ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/30 border border-amber-800/40 rounded-lg p-3">This interview slot closed at {fmtDateTime(slot.windowEndIso)}. Use <span className="font-bold">Maybe later</span> to pick a new time.</p> : null}
             <button type="button" disabled={startDisabled} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${startDisabled ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
             <button type="button" onClick={() => setShowSched(true)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl mb-3 border border-indigo-500/50">Maybe later</button>
@@ -2947,6 +3016,10 @@
       const saveTimer = useRef(null);
       /** When true, candidate login/register success ignores `returnTo` and goes to `/` (job board). Set only from JobBoardAuth “Login”. Cleared after success or when Apply / Talent Pool sends user to login. */
       const candidateLoginPreferHomeRef = useRef(false);
+      /** Guest talent-pool form data + CV; set on TP submit before register, cleared after HR-visible save or abandon. */
+      const tpGuestEntryRef = useRef(null);
+      /** Prefill CandReg when guest continues from talent pool (stable props for controlled fields). */
+      const [tpGuestRegPrefill, setTpGuestRegPrefill] = useState(null);
       /** After scheduling from Intro, highlights job card / portal: `{ jobId, at, rescheduled }`. */
       const [scheduleBoardFlash, setScheduleBoardFlash] = useState(null);
 
@@ -3133,7 +3206,7 @@
           else if (rt.name === "login") setStep("LOGIN");
           return;
         }
-        const flowBlock = new Set(["CVUP", "INTRO", "INTERVIEW", "DONE", "CAND_DETAIL", "JOBMASTER", "SCREEN", "TP_BROWSE", "AUDIT", "ANALYSIS", "TP_SUBMIT", "RIGHTS", "FORGOT", "LOADING", "CV_ANALYSER"]);
+        const flowBlock = new Set(["CVUP", "INTRO", "INTERVIEW", "DONE", "CAND_DETAIL", "JOBMASTER", "SCREEN", "TP_BROWSE", "AUDIT", "ANALYSIS", "TP_SUBMIT", "TP_DONE", "RIGHTS", "FORGOT", "LOADING", "CV_ANALYSER"]);
         if (flowBlock.has(step)) return;
         const top = new Set(["HOME", "LOGIN", "CONSENT", "REG", "PORTAL", "HR"]);
         if (!top.has(step)) return;
@@ -3379,10 +3452,22 @@
               coolingMonths={meta?.coolingMonths}
               dpo={meta?.dpo}
               onAccept={p => { setPending(p); setStep("REG"); }}
-              onDecline={() => { navigate("/login"); setStep("LOGIN"); }}
+              onDecline={() => {
+                if (tpGuestEntryRef.current) {
+                  navigate("/");
+                  setStep("TP_SUBMIT");
+                  return;
+                }
+                navigate("/login");
+                setStep("LOGIN");
+              }}
             />
           )}
-          {step === "REG" && <CandReg onRegister={async f => {
+          {step === "REG" && <CandReg
+            key={tpGuestRegPrefill ? `tp-reg-${tpGuestRegPrefill.email}` : "reg"}
+            initialName={tpGuestRegPrefill?.name || ""}
+            initialEmail={tpGuestRegPrefill?.email || ""}
+            onRegister={async f => {
             if (!f.name.trim()) return;
             try {
               const res = await fetch("/api/auth/register", {
@@ -3400,6 +3485,17 @@
               try {
                 await syncStateFromServer();
               } catch (e) {}
+              const tpPending = tpGuestEntryRef.current;
+              if (tpPending && data.candidateId) {
+                tpGuestEntryRef.current = null;
+                setTpGuestRegPrefill(null);
+                candidateLoginPreferHomeRef.current = false;
+                const finalized = { ...tpPending, candidateId: data.candidateId, id: tpPending.id || ("TP-" + Date.now()) };
+                setTalentPool((p) => [...p, finalized]);
+                navigate("/");
+                setStep("TP_DONE");
+                return;
+              }
               const preferHome = candidateLoginPreferHomeRef.current;
               candidateLoginPreferHomeRef.current = false;
               const sp = new URLSearchParams(window.location.search);
@@ -3420,7 +3516,15 @@
             } catch (e) {
               alert("Could not reach server.");
             }
-          }} onBack={() => { navigate("/login"); setStep("LOGIN"); }}/>}
+          }} onBack={() => {
+            if (tpGuestEntryRef.current) {
+              navigate("/");
+              setStep("TP_SUBMIT");
+              return;
+            }
+            navigate("/login");
+            setStep("LOGIN");
+          }}/>}
           {step === "HOME" && (
             <Jobs
               jobs={jobs}
@@ -3440,7 +3544,7 @@
                 setTpFromPortal(false);
                 const tok = localStorage.getItem(LS_TOKEN);
                 const r0 = localStorage.getItem(LS_ROLE);
-                if (!tok || r0 !== "candidate") {
+                if (tok && r0 !== "candidate") {
                   candidateLoginPreferHomeRef.current = false;
                   navigate("/login?returnTo=" + encodeURIComponent("/"));
                   setStep("LOGIN");
@@ -3560,10 +3664,33 @@
             />
           )}
           {step === "CVUP" && selJob && <CVUpload jobTitle={selJob.title} maxCvMb={maxCvMb} onComplete={handleCVUploaded} onBack={() => { navigate("/"); setStep("HOME"); setSelJob(null); }}/>}
-          {step === "TP_SUBMIT" && <TalentPoolSubmit candidate={active} maxCvMb={maxCvMb} coolingMonths={cmCooling} onSubmit={(entry) => setTalentPool(p => [...p, entry])} onBack={() => {
-            if (tpFromPortal) { navigate("/portal"); setStep("PORTAL"); }
-            else { navigate("/"); setStep("HOME"); }
-          }}/>}
+          {step === "TP_SUBMIT" && <TalentPoolSubmit
+            candidate={active}
+            guestMode={!authCandidate}
+            maxCvMb={maxCvMb}
+            coolingMonths={cmCooling}
+            onSubmit={(entry) => setTalentPool((p) => [...p, entry])}
+            onGuestContinue={(entry) => {
+              tpGuestEntryRef.current = entry;
+              setTpGuestRegPrefill({ name: entry.name, email: entry.email });
+              navigate("/register");
+              setStep("CONSENT");
+            }}
+            onBack={() => {
+              tpGuestEntryRef.current = null;
+              setTpGuestRegPrefill(null);
+              if (tpFromPortal) { navigate("/portal"); setStep("PORTAL"); }
+              else { navigate("/"); setStep("HOME"); }
+            }}
+          />}
+          {step === "TP_DONE" && (
+            <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-8 text-center">
+              <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full flex items-center justify-center mb-6 text-3xl">✓</div>
+              <h1 className="text-3xl font-black text-slate-900 mb-2">Added to Talent Pool</h1>
+              <p className="text-slate-500 mb-5 max-w-md">HR SPOCs will reach out when a matching role opens.</p>
+              <button type="button" onClick={() => { navigate("/"); setStep("HOME"); }} className="bg-slate-900 text-white px-8 py-3 rounded-xl font-bold">Done</button>
+            </div>
+          )}
           {step === "INTRO" && active && (
             <Intro
               candidate={active}
