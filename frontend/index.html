@@ -362,6 +362,32 @@
       return { ok: true };
     }
 
+    /** After scheduled start, candidate may press Start for this many minutes (single source of truth). */
+    const INTERVIEW_START_GRACE_MINUTES = 15;
+    const INTERVIEW_START_GRACE_MS = INTERVIEW_START_GRACE_MINUTES * 60 * 1000;
+
+    /** When a slot is chosen, Start is only allowed from scheduled time until grace end (unless bypassSchedule). */
+    function interviewStartSlotStatus(scheduledIso, bypassSchedule) {
+      if (bypassSchedule || !scheduledIso) {
+        return { blocked: false, tooEarly: false, tooLate: false, hasSlot: false, windowEndIso: null };
+      }
+      const schedMs = new Date(scheduledIso).getTime();
+      if (Number.isNaN(schedMs)) {
+        return { blocked: false, tooEarly: false, tooLate: false, hasSlot: false, windowEndIso: null };
+      }
+      const now = Date.now();
+      const endMs = schedMs + INTERVIEW_START_GRACE_MS;
+      const tooEarly = now < schedMs;
+      const tooLate = now >= endMs;
+      return {
+        blocked: tooEarly || tooLate,
+        tooEarly,
+        tooLate,
+        hasSlot: true,
+        windowEndIso: new Date(endMs).toISOString(),
+      };
+    }
+
     function patchLatestApp(history, jobId, patch) {
       const h = [...(history || [])];
       let bestI = -1;
@@ -1327,7 +1353,7 @@
       );
     }
 
-    function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onReattemptPortal, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false }) {
+    function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onReattemptPortal, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false, scheduleFlash = null }) {
       const [q, setQ] = useState("");
       const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
       const f = jobs.filter(j => j.title.toLowerCase().includes(q.toLowerCase()) || j.location.toLowerCase().includes(q.toLowerCase()));
@@ -1408,6 +1434,12 @@
                     </div>
                     <p className="text-slate-500 text-sm">{j.designation} · {j.location}</p>
                     <p className="text-slate-600 text-sm mt-2 line-clamp-2">{j.description}</p>
+                    {latestAppForJob?.interviewScheduledAt ? (
+                      <p className="text-xs font-bold text-teal-700 mt-2">📅 Interview scheduled: {fmtDateTime(latestAppForJob.interviewScheduledAt)}</p>
+                    ) : null}
+                    {scheduleFlash && scheduleFlash.jobId === j.id && scheduleFlash.rescheduled ? (
+                      <p className="text-xs font-semibold text-indigo-700 mt-1">* Rescheduled to {fmtDateTime(scheduleFlash.at)}</p>
+                    ) : null}
                     {extraCoolingLine}
                   </div>
                   <div className="shrink-0 flex flex-col items-end gap-2">
@@ -2141,7 +2173,7 @@
       }, []);
       return (
         <Modal title={jobTitle ? `Schedule · ${jobTitle}` : "Schedule interview"} onClose={onCancel}>
-          <p className="text-xs text-slate-500 mb-3">Date and time use your device timezone. The Start button unlocks at this time (HR can always start from the dashboard).</p>
+          <p className="text-xs text-slate-500 mb-3">Date and time use your device timezone. Start unlocks at this time; you have {INTERVIEW_START_GRACE_MINUTES} minutes after that to begin (HR can always start from the dashboard).</p>
           <input type="datetime-local" value={local} onChange={e => setLocal(e.target.value)} className="w-full border border-slate-200 rounded-xl px-3 py-2.5 mb-4 text-slate-800" />
           <button type="button" onClick={() => { if (!local) return; onConfirm(new Date(local).toISOString()); }} className="w-full py-3 bg-teal-700 hover:bg-teal-600 text-white font-bold rounded-xl">Confirm slot</button>
           <button type="button" onClick={onCancel} className="w-full mt-2 text-slate-500 text-sm py-2">Cancel</button>
@@ -2152,9 +2184,17 @@
     function Intro({ candidate, job, onStart, onBack, onLogout, onSchedule, interviewScheduledAt, bypassSchedule, eligibilityBlock }) {
       const [lang, setLang] = useState("English");
       const [showSched, setShowSched] = useState(false);
-      const schedMs = interviewScheduledAt ? new Date(interviewScheduledAt).getTime() : 0;
-      const blockStart = !bypassSchedule && schedMs > 0 && Date.now() < schedMs;
+      const [clockTick, setClockTick] = useState(0);
+      useEffect(() => {
+        if (bypassSchedule || !interviewScheduledAt) return undefined;
+        const id = setInterval(() => setClockTick((x) => x + 1), 5000);
+        return () => clearInterval(id);
+      }, [bypassSchedule, interviewScheduledAt]);
+      void clockTick;
+      const slot = interviewStartSlotStatus(interviewScheduledAt, bypassSchedule);
+      const blockSchedule = Boolean(slot.blocked);
       const blockInterview = Boolean(eligibilityBlock);
+      const startDisabled = blockSchedule || blockInterview;
       return (
         <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center">
@@ -2169,8 +2209,9 @@
             <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Language</label>
             <select value={lang} onChange={e => setLang(e.target.value)} className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white mb-5">{["English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada", "Marathi", "Gujarati", "Malayalam"].map(l => <option key={l} value={l}>{l}</option>)}</select>
             {eligibilityBlock ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/40 border border-amber-800/50 rounded-lg p-3">{eligibilityBlock}</p> : null}
-            {blockStart ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time).</p> : null}
-            <button type="button" disabled={blockStart || blockInterview} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${blockStart || blockInterview ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
+            {slot.hasSlot && slot.tooEarly ? <p className="text-amber-200/90 text-xs mb-3 text-left">Start unlocks at {fmtDateTime(interviewScheduledAt)} (your time). You then have {INTERVIEW_START_GRACE_MINUTES} minutes to begin.</p> : null}
+            {slot.hasSlot && slot.tooLate ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/30 border border-amber-800/40 rounded-lg p-3">This interview slot closed at {fmtDateTime(slot.windowEndIso)}. Use <span className="font-bold">Maybe later</span> to pick a new time.</p> : null}
+            <button type="button" disabled={startDisabled} onClick={() => onStart(lang)} className={`w-full py-3 font-bold rounded-xl mb-3 ${startDisabled ? "bg-slate-700 text-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>🎤 Start →</button>
             <button type="button" onClick={() => setShowSched(true)} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold rounded-xl mb-3 border border-indigo-500/50">Maybe later</button>
             <button type="button" onClick={onLogout} className="w-full py-3 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-white font-bold rounded-xl mb-2">Logout</button>
             <button type="button" onClick={onBack} className="text-slate-500 text-sm hover:text-slate-300">← Back</button>
@@ -2227,6 +2268,12 @@
       const [voices, setVoices] = useState([]);
       const recRef = useRef(null);
       const txRef = useRef("");
+      const spokenAnswerCommittedRef = useRef(false);
+      const suppressSpeechFinalizeRef = useRef(false);
+      const busyRef = useRef(false);
+      const dispatchAnswerRef = useRef(async (_t) => {});
+      const finalizeSpokenAnswerRef = useRef(() => {});
+      const SPEECH_FINALIZE_MS = 220;
       const aiBootRef = useRef(false);
       const hrIntroDoneRef = useRef(false);
       const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
@@ -2294,15 +2341,24 @@
       }, [applicationId]);
       useEffect(() => { const load = () => setVoices(window.speechSynthesis?.getVoices?.() || []); load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
       useEffect(() => {
+        busyRef.current = busy;
+      }, [busy]);
+      useEffect(() => {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SR) { setSupported(false); setShowText(true); return; }
         const rec = new SR();
-        rec.continuous = false; rec.interimResults = true; rec.lang = langCode;
+        rec.continuous = true; rec.interimResults = true; rec.lang = langCode;
         rec.onresult = (e) => { let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; setTranscript(t); txRef.current = t; };
-        rec.onend = () => setListening(false);
+        rec.onend = () => {
+          setListening(false);
+          setTimeout(() => finalizeSpokenAnswerRef.current(), SPEECH_FINALIZE_MS);
+        };
         rec.onerror = (e) => { setListening(false); if (e.error === "not-allowed") setMicError("Mic denied."); else if (e.error === "no-speech") setMicError("No speech."); else if (e.error !== "aborted") setMicError("Speech error."); };
         recRef.current = rec;
-        return () => { try { rec.abort(); } catch {} };
+        return () => {
+          suppressSpeechFinalizeRef.current = true;
+          try { rec.abort(); } catch {}
+        };
       }, [langCode]);
       const speak = (text) => new Promise((resolve) => {
         if (!text || !window.speechSynthesis) { resolve(); return; }
@@ -2381,15 +2437,14 @@
       const startListening = () => {
         if (!recRef.current || busy || ended) return;
         if (window.speechSynthesis) window.speechSynthesis.cancel();
+        suppressSpeechFinalizeRef.current = false;
+        spokenAnswerCommittedRef.current = false;
         setSpeaking(false); setTranscript(""); txRef.current = ""; setMicError(""); setListening(true);
         try { recRef.current.start(); } catch { setListening(false); }
       };
       const stopAndSend = () => {
-        if (recRef.current) { try { recRef.current.stop(); } catch {} }
-        setListening(false);
-        const a = (txRef.current || transcript).trim();
-        if (a) setTimeout(() => dispatchAnswer(a), 200);
-        else setMicError("No speech.");
+        if (!recRef.current) return;
+        try { recRef.current.stop(); } catch {}
       };
       const dispatchAnswer = async (text) => {
         const answer = (text || "").trim();
@@ -2449,9 +2504,23 @@
           }
         }
       };
+      dispatchAnswerRef.current = dispatchAnswer;
+      const finalizeSpokenAnswer = () => {
+        if (suppressSpeechFinalizeRef.current || spokenAnswerCommittedRef.current) return;
+        if (busyRef.current || endedRef.current) return;
+        const a = (txRef.current || "").trim();
+        if (!a) {
+          setMicError("No speech.");
+          return;
+        }
+        spokenAnswerCommittedRef.current = true;
+        void dispatchAnswerRef.current(a);
+      };
+      finalizeSpokenAnswerRef.current = finalizeSpokenAnswer;
       const sendAnswer = (text) => dispatchAnswer(text);
       const endInterview = async () => {
         if (window.speechSynthesis) window.speechSynthesis.cancel();
+        suppressSpeechFinalizeRef.current = true;
         if (recRef.current) { try { recRef.current.abort(); } catch {} }
         if (!ended && applicationId && typeof onAbandon === "function") {
           await safeAbandon("candidate_clicked_end");
@@ -2700,7 +2769,7 @@
       );
     }
 
-    function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected, onSync }) {
+    function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected, onSync, scheduleFlash = null }) {
       const focusJobId = portalFocusJobId || candidate.jobId;
       const jobIdsOrdered = (() => {
         const out = [];
@@ -2793,7 +2862,10 @@
                   <div className="bg-slate-50 rounded-xl p-4 mb-4"><p className="text-xs font-bold text-slate-400 mb-1">HR Remarks</p><p className="text-slate-700 text-sm italic">&quot;{hrNote}&quot;</p></div>
                 ) : null}
                 {getLatestAppForJob(candidate.applicationHistory, focusJobId)?.interviewScheduledAt ? (
-                  <p className="text-xs font-bold text-teal-700 mb-3">📅 Scheduled: {fmtDateTime(getLatestAppForJob(candidate.applicationHistory, focusJobId).interviewScheduledAt)}</p>
+                  <p className={`text-xs font-bold text-teal-700 ${scheduleFlash && scheduleFlash.jobId === focusJobId && scheduleFlash.rescheduled ? "mb-1" : "mb-3"}`}>📅 Scheduled: {fmtDateTime(getLatestAppForJob(candidate.applicationHistory, focusJobId).interviewScheduledAt)}</p>
+                ) : null}
+                {scheduleFlash && scheduleFlash.jobId === focusJobId && scheduleFlash.rescheduled ? (
+                  <p className="text-xs font-semibold text-indigo-700 mb-3">* Rescheduled to {fmtDateTime(scheduleFlash.at)}</p>
                 ) : null}
                 {latestApp?.interviewCompletionStatus === "incomplete_technical" ? (
                   <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 mb-3 text-xs text-amber-900">
@@ -2875,6 +2947,8 @@
       const saveTimer = useRef(null);
       /** When true, candidate login/register success ignores `returnTo` and goes to `/` (job board). Set only from JobBoardAuth “Login”. Cleared after success or when Apply / Talent Pool sends user to login. */
       const candidateLoginPreferHomeRef = useRef(false);
+      /** After scheduling from Intro, highlights job card / portal: `{ jobId, at, rescheduled }`. */
+      const [scheduleBoardFlash, setScheduleBoardFlash] = useState(null);
 
       const navigate = useCallback((url) => {
         window.history.pushState({}, "", url);
@@ -2886,6 +2960,12 @@
         window.addEventListener("popstate", onPop);
         return () => window.removeEventListener("popstate", onPop);
       }, []);
+
+      useEffect(() => {
+        if (!scheduleBoardFlash) return undefined;
+        const t = setTimeout(() => setScheduleBoardFlash(null), 180000);
+        return () => clearTimeout(t);
+      }, [scheduleBoardFlash]);
 
       const refreshReattemptCount = async () => {
         const tok = localStorage.getItem(LS_TOKEN);
@@ -3345,6 +3425,7 @@
             <Jobs
               jobs={jobs}
               applicationHistory={active?.applicationHistory || []}
+              scheduleFlash={scheduleBoardFlash}
               onApply={handleJobBoardApply}
               onReattemptPortal={(job) => {
                 setPortalFocusJobId(job.id);
@@ -3498,7 +3579,13 @@
               onSchedule={(iso) => {
                 const jid = selJob?.id || active?.jobId;
                 if (!jid) return;
+                const prev = getLatestAppForJob(active.applicationHistory, jid)?.interviewScheduledAt;
                 upd({ applicationHistory: patchLatestApp(active.applicationHistory, jid, { interviewScheduledAt: iso }) });
+                const wasReschedule = !!(prev && String(prev) !== String(iso));
+                setScheduleBoardFlash({ jobId: jid, at: iso, rescheduled: wasReschedule });
+                setTimeout(() => {
+                  syncStateFromServer().catch(() => {});
+                }, 1000);
               }}
               onLogout={logout}
               onStart={(lang) => {
@@ -3507,6 +3594,16 @@
                   const e = interviewEligibleForJob(active, j.id);
                   if (!e.ok) {
                     window.alert(e.reason || "Interview cannot start.");
+                    return;
+                  }
+                  const sched = getLatestAppForJob(active.applicationHistory, j.id)?.interviewScheduledAt;
+                  const slot = interviewStartSlotStatus(sched, false);
+                  if (slot.blocked) {
+                    window.alert(
+                      slot.tooEarly
+                        ? `Start unlocks at ${fmtDateTime(sched)}. You have ${INTERVIEW_START_GRACE_MINUTES} minutes after that to begin.`
+                        : `This slot closed at ${fmtDateTime(slot.windowEndIso)}. Pick a new time with Maybe later.`,
+                    );
                     return;
                   }
                 }
@@ -3555,7 +3652,7 @@
               else { navigate("/portal"); setStep("PORTAL"); }
             }
           }}/>}
-          {step === "PORTAL" && active && <CandDash candidate={active} jobs={jobs} portalFocusJobId={portalFocusJobId} onPortalFocusJob={setPortalFocusJobId} onApply={() => { navigate("/"); setStep("HOME"); }} onTalentPool={() => { setTpFromPortal(true); setStep("TP_SUBMIT"); }} onInterview={() => { const jid = portalFocusJobId || active.jobId; const j = jobs.find(x => x.id === jid); if (j) setSelJob(j); setStep("INTRO"); }} onRights={() => setStep("RIGHTS")} onLogout={logout} talentPoolSelected={true} onSync={syncStateFromServer}/>}
+          {step === "PORTAL" && active && <CandDash candidate={active} jobs={jobs} portalFocusJobId={portalFocusJobId} onPortalFocusJob={setPortalFocusJobId} onApply={() => { navigate("/"); setStep("HOME"); }} onTalentPool={() => { setTpFromPortal(true); setStep("TP_SUBMIT"); }} onInterview={() => { const jid = portalFocusJobId || active.jobId; const j = jobs.find(x => x.id === jid); if (j) setSelJob(j); setStep("INTRO"); }} onRights={() => setStep("RIGHTS")} onLogout={logout} talentPoolSelected={true} onSync={syncStateFromServer} scheduleFlash={scheduleBoardFlash}/>}
           {step === "RIGHTS" && active && <RightsPanel candidate={active} jobs={jobs} dpo={meta?.dpo} onUpdate={upd} onErase={() => {
             setCandidates(p => p.filter(c => c.id !== activeId));
             setActiveId(null);
