@@ -66,6 +66,43 @@
       }
     }
 
+    /**
+     * Browser Speech Synthesis has no standard gender field — prefer voices whose names hint female / neural.
+     * Falls back to best-scoring locale match; quality varies by OS and browser (free, no cloud TTS).
+     */
+    function pickFemaleFirstSpeechVoice(langCode, voicesList) {
+      const list = Array.isArray(voicesList) ? voicesList : [];
+      if (!list.length) return null;
+      const lc = (langCode || "en-IN").toLowerCase();
+      const base = lc.split("-")[0];
+      const langMatches = (vo) => {
+        const vl = (vo.lang || "").toLowerCase();
+        return vl === lc || vl.startsWith(base + "-") || vl === base;
+      };
+      let pool = list.filter(langMatches);
+      if (!pool.length) pool = list.filter((vo) => (vo.lang || "").toLowerCase().startsWith(base));
+      if (!pool.length) pool = list.slice();
+
+      const lower = (vo) => (vo.name || "").toLowerCase();
+      const femaleHint = (n) =>
+        /\bfemale\b|\bwoman\b|\bzira\b|\bsamantha\b|\bvictoria\b|\bkaren\b|\bmoira\b|\btessa\b|\bfiona\b|\bveena\b|\blatika\b|\bgoogle\b[^\w]*female|\bmicrosoft[^\w]*female|\bnatural\b|\bpremium\b/.test(n);
+      const maleHint = (n) =>
+        /\bmale\b|\bman\b|\bgoogle\b[^\w]*male|\bmicrosoft[^\w]*male/.test(n);
+
+      const score = (vo) => {
+        const n = lower(vo);
+        let s = 0;
+        if (femaleHint(n)) s += 100;
+        if (maleHint(n)) s -= 130;
+        if (/neural|natural|enhanced|online|premium/.test(n)) s += 14;
+        if (vo.localService === false) s += 8;
+        return s;
+      };
+
+      pool.sort((a, b) => score(b) - score(a));
+      return pool[0] || null;
+    }
+
     const VALID_EXTS = ["jpg", "jpeg", "pdf", "doc", "docx"];
 
     const SB = { REGISTERED: "bg-slate-100 text-slate-600", APPLIED: "bg-amber-100 text-amber-700", SCHEDULED: "bg-sky-100 text-sky-800", SHORTLISTED: "bg-blue-100 text-blue-700", INTERVIEWED: "bg-teal-100 text-teal-700", REJECTED: "bg-red-100 text-red-600", WITHDRAWN: "bg-purple-100 text-purple-700", REATTMPT: "bg-violet-100 text-violet-800" };
@@ -2004,6 +2041,35 @@
           <p className="text-sm text-slate-600 mb-3">
             {[a.currentRole, a.yearsExperience != null ? `${a.yearsExperience} yrs` : null, a.phone].filter(Boolean).join(" · ") || "—"}
           </p>
+          {Number.isFinite(a.overallFitScore) ? (
+            <div className="mb-4 rounded-2xl bg-gradient-to-br from-indigo-50 via-white to-teal-50 border border-indigo-100/80 p-4 shadow-sm">
+              <div className="flex flex-wrap items-stretch gap-4">
+                <div className="flex flex-col items-center justify-center min-w-[5.5rem] rounded-2xl bg-indigo-600 text-white px-4 py-3 shadow-md shadow-indigo-900/15">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-indigo-200">Fit</span>
+                  <span className="text-4xl font-black leading-none">{Math.round(a.overallFitScore)}</span>
+                  <span className="text-[10px] font-bold text-indigo-200 mt-0.5">/ 100</span>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-black text-slate-500 uppercase mb-1.5">Match to your JD</p>
+                  <p className="text-sm text-slate-800 leading-snug">{a.fitSummary || "—"}</p>
+                  <div className="flex flex-wrap gap-2 mt-3">
+                    {[
+                      { k: "technicalScore", label: "Technical" },
+                      { k: "experienceScore", label: "Experience" },
+                      { k: "educationScore", label: "Education" },
+                      { k: "cultureScore", label: "Culture" },
+                    ].map(({ k, label }) => (
+                      <span key={k} className="inline-flex items-baseline gap-1 text-xs font-bold bg-white/90 border border-slate-200/80 text-slate-700 px-2.5 py-1 rounded-full shadow-sm">
+                        <span className="text-slate-500 font-semibold">{label}</span>
+                        <span className="text-indigo-700">{a[k] != null ? Number(a[k]).toFixed(1) : "—"}</span>
+                        <span className="text-slate-400 font-medium">/5</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
           <p className="text-sm text-slate-800 leading-snug line-clamp-2 mb-4">{a.summary || ""}</p>
           <div className="grid md:grid-cols-2 gap-4 mb-4">
             <div className="border-l-2 border-green-500 pl-3">
@@ -2047,6 +2113,156 @@
       const [results, setResults] = useState([]);
       const [busy, setBusy] = useState(false);
       const [banner, setBanner] = useState("");
+      const [cvJobs, setCvJobs] = useState([]);
+      const [jobsLoading, setJobsLoading] = useState(true);
+      const [selectedJobId, setSelectedJobId] = useState(null);
+      const [jobForm, setJobForm] = useState({
+        title: "",
+        companyName: "Indira IVF",
+        designation: "",
+        location: "Mumbai",
+        description: "",
+      });
+      const [draftRole, setDraftRole] = useState("");
+      const [saveJobBusy, setSaveJobBusy] = useState(false);
+      const [draftBusy, setDraftBusy] = useState(false);
+
+      const defaultJobForm = () => ({
+        title: "",
+        companyName: "Indira IVF",
+        designation: "",
+        location: "Mumbai",
+        description: "",
+      });
+
+      const loadJobs = async () => {
+        setJobsLoading(true);
+        try {
+          const res = await fetch("/api/admin/cv-analyser/jobs", { headers: { ...authHeaders() } });
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 503 && String(data.error || "").toLowerCase().includes("migration")) {
+            setBanner("Run database migration: migration_cv_analyser_job.sql, then refresh.");
+            setCvJobs([]);
+            return;
+          }
+          if (!res.ok) {
+            setCvJobs([]);
+            return;
+          }
+          setCvJobs(data.jobs || []);
+        } catch {
+          setCvJobs([]);
+        } finally {
+          setJobsLoading(false);
+        }
+      };
+
+      useEffect(() => {
+        loadJobs();
+      }, []);
+
+      const applyJobToForm = (j) => {
+        setJobForm({
+          title: j.title || "",
+          companyName: j.companyName || "Indira IVF",
+          designation: j.designation || "",
+          location: j.location || "Mumbai",
+          description: j.description || "",
+        });
+      };
+
+      const onSelectJob = (e) => {
+        const v = e.target.value;
+        if (!v) {
+          setSelectedJobId(null);
+          return;
+        }
+        const id = parseInt(v, 10);
+        if (!Number.isFinite(id)) return;
+        setSelectedJobId(id);
+        const j = cvJobs.find((x) => x.id === id);
+        if (j) applyJobToForm(j);
+      };
+
+      const startNewJob = () => {
+        setSelectedJobId(null);
+        setJobForm(defaultJobForm());
+      };
+
+      const saveJob = async () => {
+        const title = jobForm.title.trim();
+        if (!title) {
+          setBanner("Enter a job title before saving.");
+          return;
+        }
+        setSaveJobBusy(true);
+        setBanner("");
+        try {
+          const url = selectedJobId != null
+            ? `/api/admin/cv-analyser/jobs/${selectedJobId}`
+            : "/api/admin/cv-analyser/jobs";
+          const method = selectedJobId != null ? "PATCH" : "POST";
+          const res = await fetch(url, {
+            method,
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+            body: JSON.stringify({
+              title: jobForm.title.trim(),
+              companyName: jobForm.companyName.trim() || "Indira IVF",
+              designation: jobForm.designation.trim(),
+              location: jobForm.location.trim() || "Mumbai",
+              description: jobForm.description.trim(),
+            }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            setBanner(data.error || "Could not save job posting.");
+            return;
+          }
+          await loadJobs();
+          if (data.id != null) setSelectedJobId(data.id);
+          applyJobToForm(data);
+        } catch {
+          setBanner("Could not save job posting.");
+        } finally {
+          setSaveJobBusy(false);
+        }
+      };
+
+      const generateDraft = async () => {
+        const role = draftRole.trim();
+        if (!role) {
+          setBanner("Enter a role name for the AI draft (e.g. Senior Embryologist).");
+          return;
+        }
+        setDraftBusy(true);
+        setBanner("");
+        try {
+          const res = await fetch("/api/admin/cv-analyser/jobs/generate-draft", {
+            method: "POST",
+            headers: { ...authHeaders(), "Content-Type": "application/json" },
+            body: JSON.stringify({ roleTitle: role }),
+          });
+          const data = await res.json().catch(() => ({}));
+          if (res.status === 503) {
+            setBanner("AI service unavailable for draft generation.");
+            return;
+          }
+          if (!res.ok) {
+            setBanner(data.error || "Draft generation failed.");
+            return;
+          }
+          setJobForm((p) => ({
+            ...p,
+            title: data.title || p.title,
+            designation: data.designation != null ? data.designation : p.designation,
+            description: data.description != null ? data.description : p.description,
+          }));
+        } catch {
+          setBanner("Could not generate draft.");
+        } finally {
+          setDraftBusy(false);
+        }
+      };
 
       const validateAndAddFiles = (fileList) => {
         const arr = Array.from(fileList || []);
@@ -2081,12 +2297,17 @@
 
       const runAnalyse = async () => {
         if (staged.length === 0) return;
+        if (selectedJobId == null) {
+          setBanner("Select or save a job posting first. CVs are scored against that JD.");
+          return;
+        }
         setBanner("");
         setBusy(true);
         const placeholders = staged.map((s) => ({ loading: true, filename: s.file.name, fileId: null }));
         setResults(placeholders);
         const fd = new FormData();
         staged.forEach((s) => fd.append("files", s.file, s.file.name));
+        fd.append("jobProfileId", String(selectedJobId));
         try {
           const res = await fetch("/api/admin/cv-analyser/batch", {
             method: "POST",
@@ -2101,6 +2322,11 @@
           }
           if (res.status === 429) {
             setBanner(data.error || "Too many requests. Try again in a minute.");
+            setResults([]);
+            return;
+          }
+          if (res.status === 404) {
+            setBanner(data.error || "Job posting not found. Refresh the job list and try again.");
             setResults([]);
             return;
           }
@@ -2153,7 +2379,71 @@
           </div>
           <div className="max-w-4xl mx-auto px-6 py-8">
             <h1 className="text-3xl font-black text-slate-900 mb-1">CV Analyser</h1>
-            <p className="text-slate-500 mb-6">Upload up to 20 CVs at once. Get structured AI summaries in seconds.</p>
+            <p className="text-slate-500 mb-6">Define or pick a job posting (JD), then upload CVs. Each CV is analysed and scored against that JD.</p>
+            <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <h2 className="text-lg font-black text-slate-900">Job Master</h2>
+                <div className="flex flex-wrap gap-2">
+                  <button type="button" disabled={jobsLoading || saveJobBusy} onClick={() => loadJobs()} className="text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50">Refresh list</button>
+                  <button type="button" disabled={saveJobBusy} onClick={startNewJob} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200">New job</button>
+                </div>
+              </div>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Saved job posting</label>
+              <select
+                value={selectedJobId != null ? String(selectedJobId) : ""}
+                onChange={onSelectJob}
+                disabled={jobsLoading}
+                className="w-full mb-4 px-3 py-2.5 rounded-xl border border-slate-200 text-slate-900 text-sm bg-white disabled:opacity-50"
+              >
+                <option value="">— Select a saved job —</option>
+                {(cvJobs || []).map((j) => (
+                  <option key={j.id} value={String(j.id)}>{j.title}{j.location ? ` · ${j.location}` : ""}</option>
+                ))}
+              </select>
+              <div className="flex flex-wrap items-end gap-2 mb-4">
+                <div className="flex-1 min-w-[180px]">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">AI draft from role name</label>
+                  <input value={draftRole} onChange={(e) => setDraftRole(e.target.value)} placeholder="Role title for draft" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                </div>
+                <button type="button" disabled={draftBusy || saveJobBusy} onClick={generateDraft} className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-sm font-bold disabled:opacity-40">
+                  {draftBusy ? "Drafting…" : "Generate draft"}
+                </button>
+              </div>
+              <div className="grid sm:grid-cols-2 gap-3 mb-3">
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Job title</label>
+                  <input value={jobForm.title} onChange={(e) => setJobForm((p) => ({ ...p, title: e.target.value }))} placeholder="e.g. Clinical Embryologist" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Company</label>
+                  <input value={jobForm.companyName} onChange={(e) => setJobForm((p) => ({ ...p, companyName: e.target.value }))} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Location</label>
+                  <input value={jobForm.location} onChange={(e) => setJobForm((p) => ({ ...p, location: e.target.value }))} className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Designation</label>
+                  <input value={jobForm.designation} onChange={(e) => setJobForm((p) => ({ ...p, designation: e.target.value }))} placeholder="Official designation / grade" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Job description (JD)</label>
+                  <textarea value={jobForm.description} onChange={(e) => setJobForm((p) => ({ ...p, description: e.target.value }))} rows={5} placeholder="Responsibilities, must-have skills, clinic context…" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm resize-y min-h-[120px]" />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-slate-100">
+                <button type="button" disabled={saveJobBusy} onClick={saveJob} className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold disabled:opacity-40">
+                  {saveJobBusy ? "Saving…" : selectedJobId != null ? "Save changes" : "Save job posting"}
+                </button>
+                <p className="text-xs text-slate-500">
+                  {selectedJobId != null ? (
+                    <>Job #{selectedJobId} selected. Analysis uses the last saved JD — save after you edit fields.</>
+                  ) : (
+                    <>Save a job posting, then select it above to analyse CVs.</>
+                  )}
+                </p>
+              </div>
+            </div>
             {banner ? <div className="mb-4 text-sm text-amber-900 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">{banner}</div> : null}
             <div
               role="button"
@@ -2184,7 +2474,7 @@
             ) : null}
             <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
               <button type="button" disabled={busy} onClick={() => { setStaged([]); setBanner(""); }} className="text-sm font-bold text-slate-600 hover:text-slate-900">Clear All</button>
-              <button type="button" disabled={busy || staged.length === 0} onClick={runAnalyse} className="px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold rounded-xl text-sm transition-colors">
+              <button type="button" disabled={busy || staged.length === 0 || selectedJobId == null || jobsLoading} onClick={runAnalyse} className="px-6 py-3 bg-slate-900 hover:bg-slate-800 disabled:bg-slate-300 text-white font-bold rounded-xl text-sm transition-colors">
                 {busy ? "Analysing…" : `Analyse ${staged.length} CV${staged.length === 1 ? "" : "s"} →`}
               </button>
             </div>
@@ -2274,7 +2564,7 @@
             {interviewScheduledAt ? (
               <p className="text-xs text-teal-300 mb-3">📅 Scheduled: {fmtDateTime(interviewScheduledAt)}</p>
             ) : null}
-            <div className="bg-indigo-900/40 border border-indigo-800 rounded-xl p-3 mb-5 text-left text-xs text-indigo-200"><p className="font-bold text-indigo-100 mb-1">🎙️ How it works</p><p>Swar AI speaks questions aloud. Tap mic to answer.</p></div>
+            <div className="bg-indigo-900/40 border border-indigo-800 rounded-xl p-3 mb-5 text-left text-xs text-indigo-200"><p className="font-bold text-indigo-100 mb-1">🎙️ How it works</p><p>Press Start once on the next screen. Swar asks each question aloud; your reply is captured automatically after a short pause.</p></div>
             <label className="block text-xs font-bold text-slate-400 uppercase mb-2">Language</label>
             <select value={lang} onChange={e => setLang(e.target.value)} className="w-full px-4 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-white mb-5">{["English", "Hindi", "Bengali", "Tamil", "Telugu", "Kannada", "Marathi", "Gujarati", "Malayalam"].map(l => <option key={l} value={l}>{l}</option>)}</select>
             {eligibilityBlock ? <p className="text-amber-200/90 text-xs mb-3 text-left bg-amber-950/40 border border-amber-800/50 rounded-lg p-3">{eligibilityBlock}</p> : null}
@@ -2320,6 +2610,10 @@
       useEffect(() => {
         sessionMountRef.current = Date.now();
         abandonNotifiedRef.current = false;
+        hrIntroDoneRef.current = false;
+        aiBootRef.current = false;
+        hrTranslateCacheRef.current = {};
+        setInterviewStarted(false);
       }, [applicationId]);
       const visHideTimerRef = useRef(null);
       const applicationIdRef = useRef(applicationId);
@@ -2343,11 +2637,45 @@
       const dispatchAnswerRef = useRef(async (_t) => {});
       const finalizeSpokenAnswerRef = useRef(() => {});
       const SPEECH_FINALIZE_MS = 220;
+      const SILENCE_SUBMIT_MS = 3000;
       const aiBootRef = useRef(false);
       const hrIntroDoneRef = useRef(false);
+      const [interviewStarted, setInterviewStarted] = useState(false);
+      const autoListenActiveRef = useRef(false);
+      const hadSpeechRef = useRef(false);
+      const silenceTimerRef = useRef(null);
+      const listeningRef = useRef(false);
+      /** True only when silence timer called rec.stop(); onend should finalize, not restart. */
+      const intentionalStopRef = useRef(false);
+      /** Prefix text before a mid-answer recognition restart (browser session limit). */
+      const accumulatedAnswerRef = useRef("");
+      const hrTranslateCacheRef = useRef({});
+      const startAutoListenAfterQuestionRef = useRef(() => {});
       const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
       const langCode = langMap[context.language] || "en-IN";
       const sysAi = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX_AI} questions, end with [INTERVIEW_COMPLETE].`;
+      const translateHrScriptLine = useCallback(
+        async (raw) => {
+          const t = (raw == null ? "" : String(raw)).trim();
+          if (!t) return t;
+          const target = (context.language || "English").trim();
+          if (/^english$/i.test(target)) return t;
+          if (typeof window !== "undefined" && !window.CLAUDE_API_URL) return t;
+          const key = target + "\n" + t;
+          const c = hrTranslateCacheRef.current;
+          if (c[key]) return c[key];
+          const system = `You translate job interview questions for text-to-speech. Output ONLY the translated question in ${target}. No title, no quotes, no explanation, no markdown. Preserve proper names, product names, and acronyms where natural in ${target}. If the text is already in ${target}, return it unchanged.`;
+          try {
+            const out = await callClaude([{ role: "user", content: "Translate this interview question:\n\n" + t }], system);
+            const cleaned = (out || "").replace(/```[a-z]*\n?/gi, "").replace(/```/g, "").trim() || t;
+            c[key] = cleaned;
+            return cleaned;
+          } catch (e) {
+            return t;
+          }
+        },
+        [context.language],
+      );
       const safeAbandon = async (detail) => {
         if (abandonNotifiedRef.current || !applicationId) return;
         const fn = onAbandonRef.current;
@@ -2413,19 +2741,79 @@
         busyRef.current = busy;
       }, [busy]);
       useEffect(() => {
+        listeningRef.current = listening;
+      }, [listening]);
+      useEffect(() => {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (!SR) { setSupported(false); setShowText(true); return; }
         const rec = new SR();
         rec.continuous = true; rec.interimResults = true; rec.lang = langCode;
-        rec.onresult = (e) => { let t = ""; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; setTranscript(t); txRef.current = t; };
+        rec.onresult = (e) => {
+          let sessionT = "";
+          for (let i = 0; i < e.results.length; i++) sessionT += e.results[i][0].transcript;
+          const prefix = accumulatedAnswerRef.current ? accumulatedAnswerRef.current + " " : "";
+          const merged = (prefix + sessionT).trim();
+          setTranscript(merged);
+          txRef.current = merged;
+          if (merged) hadSpeechRef.current = true;
+          if (autoListenActiveRef.current) {
+            clearTimeout(silenceTimerRef.current);
+            silenceTimerRef.current = setTimeout(() => {
+              if (!autoListenActiveRef.current || !listeningRef.current) return;
+              if (!hadSpeechRef.current) return;
+              intentionalStopRef.current = true;
+              autoListenActiveRef.current = false;
+              try { rec.stop(); } catch (_) {}
+            }, SILENCE_SUBMIT_MS);
+          }
+        };
         rec.onend = () => {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+          if (suppressSpeechFinalizeRef.current) {
+            setListening(false);
+            autoListenActiveRef.current = false;
+            intentionalStopRef.current = false;
+            return;
+          }
+          if (autoListenActiveRef.current && !intentionalStopRef.current && !spokenAnswerCommittedRef.current) {
+            const full = (txRef.current || "").trim();
+            if (full) {
+              accumulatedAnswerRef.current = full;
+              hadSpeechRef.current = true;
+            }
+            try {
+              rec.start();
+              setListening(true);
+              return;
+            } catch (_) {
+              setListening(false);
+              autoListenActiveRef.current = false;
+              intentionalStopRef.current = false;
+              setTimeout(() => finalizeSpokenAnswerRef.current(), SPEECH_FINALIZE_MS);
+              return;
+            }
+          }
+          intentionalStopRef.current = false;
           setListening(false);
+          autoListenActiveRef.current = false;
           setTimeout(() => finalizeSpokenAnswerRef.current(), SPEECH_FINALIZE_MS);
         };
-        rec.onerror = (e) => { setListening(false); if (e.error === "not-allowed") setMicError("Mic denied."); else if (e.error === "no-speech") setMicError("No speech."); else if (e.error !== "aborted") setMicError("Speech error."); };
+        rec.onerror = (e) => {
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+          setListening(false);
+          autoListenActiveRef.current = false;
+          intentionalStopRef.current = false;
+          if (e.error === "not-allowed") setMicError("Mic denied.");
+          else if (e.error === "no-speech") setMicError("No speech.");
+          else if (e.error !== "aborted") setMicError("Speech error.");
+        };
         recRef.current = rec;
         return () => {
           suppressSpeechFinalizeRef.current = true;
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
           try { rec.abort(); } catch {}
         };
       }, [langCode]);
@@ -2433,8 +2821,10 @@
         if (!text || !window.speechSynthesis) { resolve(); return; }
         window.speechSynthesis.cancel();
         const u = new SpeechSynthesisUtterance(text);
-        u.lang = langCode; u.rate = 0.95;
-        const v = voices.find((vo) => vo.lang === langCode) || voices.find((vo) => vo.lang.startsWith(langCode.split("-")[0]));
+        u.lang = langCode;
+        u.rate = 0.91;
+        u.pitch = 1.02;
+        const v = pickFemaleFirstSpeechVoice(langCode, voices);
         if (v) u.voice = v;
         u.onstart = () => setSpeaking(true);
         u.onend = () => { setSpeaking(false); resolve(); };
@@ -2473,25 +2863,38 @@
         return () => clearTimeout(t);
       }, [applicationId]);
       useEffect(() => {
-        if (phase !== "hr" || !script?.questions?.length || hrIntroDoneRef.current) return;
-        hrIntroDoneRef.current = true;
+        if (phase !== "hr" || !script?.questions?.length || !interviewStarted) return;
         let cancelled = false;
         (async () => {
           await new Promise((r) => setTimeout(r, 400));
           if (cancelled) return;
+          if (hrIntroDoneRef.current) return;
+          hrIntroDoneRef.current = true;
           const q0 = script.questions[0];
-          setMsgs([{ role: "ai", text: q0.question, tag: "hr" }]);
-          await speak(q0.question);
+          setBusy(true);
+          let toSpeak = q0.question;
+          try {
+            toSpeak = await translateHrScriptLine(q0.question);
+          } catch (_) {}
+          if (cancelled) {
+            setBusy(false);
+            return;
+          }
+          setBusy(false);
+          setMsgs([{ role: "ai", text: toSpeak, tag: "hr" }]);
+          await speak(toSpeak);
+          if (!cancelled) startAutoListenAfterQuestionRef.current();
         })();
         return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
-      }, [phase, script]);
+      }, [phase, script, interviewStarted, translateHrScriptLine]);
       useEffect(() => {
-        if (phase !== "ai" || aiBootRef.current) return;
-        aiBootRef.current = true;
+        if (phase !== "ai") return;
         let cancelled = false;
         (async () => {
           await new Promise((r) => setTimeout(r, 300));
           if (cancelled) return;
+          if (aiBootRef.current) return;
+          aiBootRef.current = true;
           setBusy(true);
           const r0 = await callClaude([{ role: "user", content: "Start." }], sysAi);
           if (cancelled) return;
@@ -2500,24 +2903,36 @@
           setHist([{ role: "user", content: "Start." }, { role: "assistant", content: r0 }]);
           setBusy(false);
           await speak(clean);
+          if (!cancelled) startAutoListenAfterQuestionRef.current();
         })();
         return () => { cancelled = true; };
       }, [phase]);
-      const startListening = () => {
-        if (!recRef.current || busy || ended) return;
-        if (window.speechSynthesis) window.speechSynthesis.cancel();
+      const startAutoListenAfterQuestion = () => {
+        if (!recRef.current || endedRef.current) return;
         suppressSpeechFinalizeRef.current = false;
         spokenAnswerCommittedRef.current = false;
-        setSpeaking(false); setTranscript(""); txRef.current = ""; setMicError(""); setListening(true);
-        try { recRef.current.start(); } catch { setListening(false); }
+        hadSpeechRef.current = false;
+        intentionalStopRef.current = false;
+        accumulatedAnswerRef.current = "";
+        autoListenActiveRef.current = true;
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
+        setTranscript("");
+        txRef.current = "";
+        setMicError("");
+        setListening(true);
+        try {
+          recRef.current.start();
+        } catch (_) {
+          setListening(false);
+          autoListenActiveRef.current = false;
+        }
       };
-      const stopAndSend = () => {
-        if (!recRef.current) return;
-        try { recRef.current.stop(); } catch {}
-      };
+      startAutoListenAfterQuestionRef.current = startAutoListenAfterQuestion;
       const dispatchAnswer = async (text) => {
         const answer = (text || "").trim();
         if (!answer || busy || ended) return;
+        accumulatedAnswerRef.current = "";
         setTranscript(""); txRef.current = ""; setTextInput(""); setMicError("");
         if (phase === "hr" && script?.questions?.length) {
           const cur = script.questions[hrIdx];
@@ -2534,9 +2949,14 @@
             setHrIdx(nextIdx);
             setBusy(true);
             const nq = script.questions[nextIdx];
-            setMsgs((p) => [...p, { role: "ai", text: nq.question, tag: "hr" }]);
+            let toSpeak = nq.question;
+            try {
+              toSpeak = await translateHrScriptLine(nq.question);
+            } catch (_) {}
+            setMsgs((p) => [...p, { role: "ai", text: toSpeak, tag: "hr" }]);
             setBusy(false);
-            await speak(nq.question);
+            await speak(toSpeak);
+            startAutoListenAfterQuestion();
           } else {
             setBusy(true);
             try {
@@ -2552,13 +2972,14 @@
           return;
         }
         if (phase === "ai") {
+          const prevAiQCount = aiQCount;
           const h = [...hist, { role: "user", content: answer }];
           setBusy(true);
           const r = await callClaude(h, sysAi);
           const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
-          const isLast = r.includes("[INTERVIEW_COMPLETE]") || aiQCount + 1 >= MAX_AI;
           setHist([...h, { role: "assistant", content: r }]);
           setAiQCount((c) => c + 1);
+          const nextUserTurnCount = prevAiQCount + 1;
           setBusy(false);
           let transcriptOut = null;
           setMsgs((p) => {
@@ -2567,9 +2988,11 @@
             return next;
           });
           await speak(clean);
-          if (isLast && transcriptOut) {
+          if (nextUserTurnCount >= MAX_AI && transcriptOut) {
             setEnded(true);
             setTimeout(() => onEnd(transcriptOut), 450);
+          } else {
+            startAutoListenAfterQuestion();
           }
         }
       };
@@ -2590,6 +3013,11 @@
       const endInterview = async () => {
         if (window.speechSynthesis) window.speechSynthesis.cancel();
         suppressSpeechFinalizeRef.current = true;
+        autoListenActiveRef.current = false;
+        intentionalStopRef.current = false;
+        accumulatedAnswerRef.current = "";
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
         if (recRef.current) { try { recRef.current.abort(); } catch {} }
         if (!ended && applicationId && typeof onAbandon === "function") {
           await safeAbandon("candidate_clicked_end");
@@ -2632,15 +3060,24 @@
               {busy && <p className="text-indigo-300 text-sm animate-pulse">Swar is thinking…</p>}
               {speaking && !busy && <p className="text-indigo-300 text-sm">🔊 Swar is speaking</p>}
               {listening && <p className="text-red-300 text-sm animate-pulse">🎤 Listening…</p>}
-              {!busy && !speaking && !listening && !ended && <p className="text-slate-400 text-sm">Tap mic to answer</p>}
+              {!busy && !speaking && !listening && !ended && phase === "hr" && script?.questions?.length > 0 && !interviewStarted && (
+                <p className="text-slate-400 text-sm max-w-md mx-auto">Press Start once — after each question, speak your answer; it sends after {SILENCE_SUBMIT_MS / 1000}s of silence.</p>
+              )}
               {ended && <p className="text-green-300 text-sm">✓ Complete</p>}
               {micError && <p className="text-amber-400 text-xs mt-1">{micError}</p>}
             </div>
             {lastQ && <div className="max-w-xl w-full bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-4 text-center"><p className="text-xs uppercase font-black text-indigo-400 mb-2">Question</p><p className="text-white text-base">{lastQ.text}</p></div>}
             {(transcript || listening) && <div className="max-w-xl w-full bg-red-900/20 border border-red-800/50 rounded-2xl p-4 mb-4"><p className="text-xs uppercase font-black text-red-300 mb-1">Your answer</p><p className="text-white">{transcript || <span className="text-slate-500 italic">Speak now…</span>}</p></div>}
-            {!ended && supported && (
+            {!ended && supported && phase === "hr" && script?.questions?.length > 0 && !interviewStarted && (
               <div className="flex flex-col items-center gap-3 my-4">
-                {!listening ? <button type="button" onClick={startListening} disabled={busy || speaking} className="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white shadow-2xl flex items-center justify-center text-3xl">🎤</button> : <button type="button" onClick={stopAndSend} className="w-20 h-20 rounded-full bg-red-600 text-white shadow-2xl flex items-center justify-center text-3xl animate-pulse">⏹</button>}
+                <button
+                  type="button"
+                  onClick={() => setInterviewStarted(true)}
+                  disabled={busy}
+                  className="px-10 py-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-700 text-white font-black text-lg shadow-2xl"
+                >
+                  Start interview
+                </button>
               </div>
             )}
             {showText && !ended && (
@@ -2649,7 +3086,9 @@
                 <button type="button" onClick={() => sendAnswer(textInput)} disabled={!textInput.trim() || busy} className="px-5 py-3 bg-indigo-600 text-white font-bold rounded-xl text-sm disabled:bg-slate-700">Send</button>
               </div>
             )}
-            {supported && !showText && !ended && <button type="button" onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>}
+            {supported && !showText && !ended && (phase !== "hr" || interviewStarted) && (
+              <button type="button" onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>
+            )}
             {!supported && <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-center text-amber-200 text-sm max-w-md">⚠ Browser doesn't support voice. Use text.</div>}
           </div>
         </div>

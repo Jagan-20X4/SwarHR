@@ -1,8 +1,12 @@
 const Anthropic = require("@anthropic-ai/sdk");
 const {
   SYSTEM_PROMPT,
+  FIT_SYSTEM_PROMPT,
   buildUserPrompt,
   buildVisionPdfUserPrompt,
+  buildUserPromptWithJob,
+  buildVisionPdfUserPromptWithJob,
+  buildGenerateJdUserPrompt,
 } = require("./cvAnalyserPrompt");
 
 function stripJsonFences(raw) {
@@ -51,6 +55,45 @@ function validateAnalysis(a) {
     return false;
   }
   return true;
+}
+
+function clampScore05(v) {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(5, Math.max(0, n));
+}
+
+function validateFitAnalysis(a) {
+  if (!validateAnalysis(a)) return false;
+  if (typeof a.fitSummary !== "string" || !String(a.fitSummary).trim()) return false;
+  const fit = Number(a.overallFitScore);
+  if (!Number.isFinite(fit) || fit < 0 || fit > 100) return false;
+  for (const k of [
+    "technicalScore",
+    "experienceScore",
+    "educationScore",
+    "cultureScore",
+  ]) {
+    const n = Number(a[k]);
+    if (!Number.isFinite(n) || n < 0 || n > 5) return false;
+  }
+  return true;
+}
+
+function normalizeFitAnalysis(raw) {
+  const base = normalizeAnalysis(raw);
+  return {
+    ...base,
+    fitSummary: String(raw.fitSummary || "").trim(),
+    overallFitScore: Math.min(
+      100,
+      Math.max(0, Number(raw.overallFitScore)),
+    ),
+    technicalScore: clampScore05(raw.technicalScore),
+    experienceScore: clampScore05(raw.experienceScore),
+    educationScore: clampScore05(raw.educationScore),
+    cultureScore: clampScore05(raw.cultureScore),
+  };
 }
 
 function normalizeAnalysis(raw) {
@@ -131,6 +174,96 @@ async function analyzeCvWithClaudePdfBuffer(buf, filename) {
   return normalizeAnalysis(parsed);
 }
 
+async function analyzeCvWithClaudePdfBufferForJob(buf, filename, job) {
+  const apiKey = process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim();
+  if (!apiKey) {
+    const err = new Error("AI_UNAVAILABLE");
+    err.code = "AI_UNAVAILABLE";
+    throw err;
+  }
+  const client = new Anthropic({ apiKey });
+  const data = buf.toString("base64");
+  const msg = await client.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 4096,
+    temperature: 0.2,
+    system: FIT_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "document",
+            source: {
+              type: "base64",
+              media_type: "application/pdf",
+              data,
+            },
+          },
+          {
+            type: "text",
+            text: buildVisionPdfUserPromptWithJob(filename || "resume.pdf", job),
+          },
+        ],
+      },
+    ],
+  });
+  const block = (msg.content || []).find((b) => b.type === "text");
+  const rawText = block && block.text ? block.text : "";
+  let parsed;
+  try {
+    parsed = JSON.parse(stripJsonFences(rawText));
+  } catch {
+    const err = new Error("MALFORMED_JSON");
+    err.code = "MALFORMED_JSON";
+    throw err;
+  }
+  if (!validateFitAnalysis(parsed)) {
+    const err = new Error("INVALID_SCHEMA");
+    err.code = "INVALID_SCHEMA";
+    throw err;
+  }
+  return normalizeFitAnalysis(parsed);
+}
+
+async function analyzeCvWithClaudeForJob(extractedText, job) {
+  const apiKey = process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim();
+  if (!apiKey) {
+    const err = new Error("AI_UNAVAILABLE");
+    err.code = "AI_UNAVAILABLE";
+    throw err;
+  }
+  const client = new Anthropic({ apiKey });
+  const msg = await client.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 2000,
+    temperature: 0.2,
+    system: FIT_SYSTEM_PROMPT,
+    messages: [
+      {
+        role: "user",
+        content: buildUserPromptWithJob(extractedText, job),
+      },
+    ],
+  });
+  const block = (msg.content || []).find((b) => b.type === "text");
+  const rawText = block && block.text ? block.text : "";
+  let parsed;
+  try {
+    parsed = JSON.parse(stripJsonFences(rawText));
+  } catch {
+    const err = new Error("MALFORMED_JSON");
+    err.code = "MALFORMED_JSON";
+    throw err;
+  }
+  if (!validateFitAnalysis(parsed)) {
+    const err = new Error("INVALID_SCHEMA");
+    err.code = "INVALID_SCHEMA";
+    throw err;
+  }
+  return normalizeFitAnalysis(parsed);
+}
+
 async function analyzeCvWithClaude(extractedText) {
   const apiKey = process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim();
   if (!apiKey) {
@@ -169,10 +302,63 @@ async function analyzeCvWithClaude(extractedText) {
   return normalizeAnalysis(parsed);
 }
 
+async function generateJobDraftClaude(roleTitle) {
+  const apiKey = process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY.trim();
+  if (!apiKey) {
+    const err = new Error("AI_UNAVAILABLE");
+    err.code = "AI_UNAVAILABLE";
+    throw err;
+  }
+  const client = new Anthropic({ apiKey });
+  const msg = await client.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1200,
+    temperature: 0.35,
+    system:
+      "You draft professional job postings for Indira IVF. Output ONLY valid JSON per user instructions. No markdown fences.",
+    messages: [
+      {
+        role: "user",
+        content: buildGenerateJdUserPrompt(roleTitle),
+      },
+    ],
+  });
+  const block = (msg.content || []).find((b) => b.type === "text");
+  const rawText = block && block.text ? block.text : "";
+  let parsed;
+  try {
+    parsed = JSON.parse(stripJsonFences(rawText));
+  } catch {
+    const err = new Error("MALFORMED_JSON");
+    err.code = "MALFORMED_JSON";
+    throw err;
+  }
+  if (
+    !parsed ||
+    typeof parsed.title !== "string" ||
+    typeof parsed.designation !== "string" ||
+    typeof parsed.description !== "string"
+  ) {
+    const err = new Error("INVALID_SCHEMA");
+    err.code = "INVALID_SCHEMA";
+    throw err;
+  }
+  return {
+    title: String(parsed.title).trim().slice(0, 500),
+    designation: String(parsed.designation).trim().slice(0, 500),
+    description: String(parsed.description).trim().slice(0, 16000),
+  };
+}
+
 module.exports = {
   analyzeCvWithClaude,
   analyzeCvWithClaudePdfBuffer,
+  analyzeCvWithClaudeForJob,
+  analyzeCvWithClaudePdfBufferForJob,
+  generateJobDraftClaude,
   validateAnalysis,
+  validateFitAnalysis,
   normalizeAnalysis,
+  normalizeFitAnalysis,
   stripJsonFences,
 };

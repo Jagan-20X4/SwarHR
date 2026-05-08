@@ -10,8 +10,9 @@ const {
   sha256Text,
 } = require("../lib/extractText");
 const {
-  analyzeCvWithClaude,
-  analyzeCvWithClaudePdfBuffer,
+  analyzeCvWithClaudeForJob,
+  analyzeCvWithClaudePdfBufferForJob,
+  generateJobDraftClaude,
 } = require("../lib/anthropicClient");
 
 const rateBuckets = new Map();
@@ -98,6 +99,18 @@ Detail: ${safeDetail}
 No machine-readable CV body was extracted (common for infographic or image-heavy PDFs). You must still output ONLY valid JSON matching the exact schema. In summary (2 sentences max), state clearly that no resume text could be extracted from the file. Do not invent employers, degrees, dates, or job titles. candidateName: use "Unknown" unless the filename alone plausibly encodes a person's name. email, phone, currentRole, yearsExperience: null unless clearly parseable from the filename. strengths: exactly 3 strings, each stating a specific limitation due to missing text (no fabricated strengths). gaps: exactly 3 strings, honest data gaps. skills: at most 8 items; use only tokens clearly suggested by the filename, otherwise an empty array. education: empty array if unknown. redFlags: include that no CV text could be extracted. verdict: use "fresher" if there is no evidence to classify higher.`;
   }
 
+  function jobContextHashFromRow(row) {
+    if (!row) return "";
+    const canonical = JSON.stringify({
+      t: row.title,
+      c: row.company_name,
+      d: row.designation,
+      l: row.location,
+      desc: row.description,
+    });
+    return crypto.createHash("sha256").update(canonical).digest("hex");
+  }
+
   async function insertAudit(client, hrId, fileId, filename, candidateEmail) {
     const id = `ae-cv-${crypto.randomUUID()}`;
     const details = JSON.stringify({
@@ -111,7 +124,7 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
     );
   }
 
-  async function processOneFile(file, hrId) {
+  async function processOneFile(file, hrId, jobRow) {
     const filename = file.originalname || "cv";
     const fileId = crypto.randomUUID();
     const buf = file.buffer;
@@ -197,11 +210,12 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       textHash = sha256Text(t);
     }
 
+    const jch = jobContextHashFromRow(jobRow);
     const cached = await pool.query(
       `SELECT file_id, text_hash, analysis_json FROM cv_analysis_cache
-       WHERE text_hash = $1 AND created_at > NOW() - INTERVAL '30 days'
+       WHERE text_hash = $1 AND job_context_hash = $2 AND created_at > NOW() - INTERVAL '30 days'
        LIMIT 1`,
-      [textHash],
+      [textHash, jch],
     );
     if (cached.rows.length > 0) {
       const row = cached.rows[0];
@@ -223,9 +237,9 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
     let analysis;
     try {
       if (usePdfVision) {
-        analysis = await analyzeCvWithClaudePdfBuffer(buf, filename);
+        analysis = await analyzeCvWithClaudePdfBufferForJob(buf, filename, jobRow);
       } else {
-        analysis = await analyzeCvWithClaude(t);
+        analysis = await analyzeCvWithClaudeForJob(t, jobRow);
       }
     } catch (e) {
       if (e && e.code === "AI_UNAVAILABLE") {
@@ -266,8 +280,8 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       await client.query("BEGIN");
       await client.query(
         `INSERT INTO cv_analysis_cache
-         (file_id, text_hash, original_filename, mime_type, file_bytes, analysis_json, analysed_by_hr_id)
-         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+         (file_id, text_hash, original_filename, mime_type, file_bytes, analysis_json, analysed_by_hr_id, job_context_hash)
+         VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,
         [
           fileId,
           textHash,
@@ -276,6 +290,7 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
           buf,
           JSON.stringify(analysis),
           hrId,
+          jch,
         ],
       );
       await insertAudit(client, hrId, fileId, filename, analysis.email);
@@ -284,8 +299,8 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       await client.query("ROLLBACK").catch(() => {});
       if (insErr && insErr.code === "23505") {
         const again = await pool.query(
-          `SELECT file_id, analysis_json FROM cv_analysis_cache WHERE text_hash = $1 LIMIT 1`,
-          [textHash],
+          `SELECT file_id, analysis_json FROM cv_analysis_cache WHERE text_hash = $1 AND job_context_hash = $2 LIMIT 1`,
+          [textHash, jch],
         );
         if (again.rows.length > 0) {
           const row = again.rows[0];
@@ -315,6 +330,128 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
     };
   }
 
+  router.get("/jobs", requireHR, async (req, res) => {
+    try {
+      const r = await pool.query(
+        `SELECT id, title, company_name AS "companyName", designation, location, description,
+                EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"
+         FROM cv_analyser_job WHERE hr_id = $1 ORDER BY updated_at DESC`,
+        [req.hrId],
+      );
+      res.json({ jobs: r.rows });
+    } catch (e) {
+      console.error(e);
+      if (e && e.code === "42P01") {
+        return res.status(503).json({ error: "CV analyser job migration not applied" });
+      }
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  router.post("/jobs/generate-draft", requireHR, async (req, res) => {
+    if (!process.env.ANTHROPIC_API_KEY || !process.env.ANTHROPIC_API_KEY.trim()) {
+      return res.status(503).json({ error: "AI service unavailable", code: "AI_UNAVAILABLE" });
+    }
+    const roleTitle = req.body && req.body.roleTitle != null ? String(req.body.roleTitle).trim() : "";
+    if (!roleTitle) {
+      return res.status(400).json({ error: "roleTitle required" });
+    }
+    try {
+      const draft = await generateJobDraftClaude(roleTitle);
+      res.json({
+        title: draft.title || roleTitle,
+        designation: draft.designation || "",
+        description: draft.description || "",
+      });
+    } catch (e) {
+      if (e && e.code === "AI_UNAVAILABLE") {
+        return res.status(503).json({ error: "AI service unavailable", code: "AI_UNAVAILABLE" });
+      }
+      console.error(e);
+      res.status(500).json({ error: "Draft generation failed" });
+    }
+  });
+
+  router.post("/jobs", requireHR, async (req, res) => {
+    const b = req.body || {};
+    const title = String(b.title || "").trim();
+    if (!title) return res.status(400).json({ error: "title required" });
+    const companyName = String(b.companyName || "Indira IVF").trim() || "Indira IVF";
+    const designation = String(b.designation || "").trim();
+    const location = String(b.location || "Mumbai").trim() || "Mumbai";
+    const description = String(b.description || "").trim();
+    try {
+      const ins = await pool.query(
+        `INSERT INTO cv_analyser_job (hr_id, title, company_name, designation, location, description)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         RETURNING id, title, company_name AS "companyName", designation, location, description,
+                   EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                   EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+        [req.hrId, title, companyName, designation, location, description],
+      );
+      res.status(201).json(ins.rows[0]);
+    } catch (e) {
+      console.error(e);
+      if (e && e.code === "42P01") {
+        return res.status(503).json({ error: "CV analyser job migration not applied" });
+      }
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  router.patch("/jobs/:id", requireHR, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+    const b = req.body || {};
+    try {
+      const cur = await pool.query(
+        `SELECT id FROM cv_analyser_job WHERE id = $1 AND hr_id = $2`,
+        [id, req.hrId],
+      );
+      if (cur.rows.length === 0) return res.status(404).json({ error: "Not found" });
+      const title = b.title != null ? String(b.title).trim() : null;
+      const companyName = b.companyName != null ? String(b.companyName).trim() : null;
+      const designation = b.designation != null ? String(b.designation).trim() : null;
+      const location = b.location != null ? String(b.location).trim() : null;
+      const description = b.description != null ? String(b.description).trim() : null;
+      const upd = await pool.query(
+        `UPDATE cv_analyser_job SET
+           title = COALESCE($1, title),
+           company_name = COALESCE($2, company_name),
+           designation = COALESCE($3, designation),
+           location = COALESCE($4, location),
+           description = COALESCE($5, description),
+           updated_at = NOW()
+         WHERE id = $6 AND hr_id = $7
+         RETURNING id, title, company_name AS "companyName", designation, location, description,
+                   EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                   EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+        [title, companyName, designation, location, description, id, req.hrId],
+      );
+      res.json(upd.rows[0]);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  router.delete("/jobs/:id", requireHR, async (req, res) => {
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ error: "Invalid id" });
+    try {
+      const del = await pool.query(
+        `DELETE FROM cv_analyser_job WHERE id = $1 AND hr_id = $2 RETURNING id`,
+        [id, req.hrId],
+      );
+      if (del.rows.length === 0) return res.status(404).json({ error: "Not found" });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
   router.post(
     "/batch",
     requireHR,
@@ -342,9 +479,32 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       if (files.length > maxFiles) {
         return res.status(400).json({ error: `Max ${maxFiles} files` });
       }
+      const jobProfileId = req.body && req.body.jobProfileId != null
+        ? parseInt(String(req.body.jobProfileId), 10)
+        : NaN;
+      if (!Number.isFinite(jobProfileId)) {
+        return res.status(400).json({ error: "jobProfileId required (select a saved job posting)" });
+      }
       const hrId = req.hrId;
+      let jobRes;
+      try {
+        jobRes = await pool.query(
+          `SELECT id, title, company_name, designation, location, description FROM cv_analyser_job
+           WHERE id = $1 AND hr_id = $2`,
+          [jobProfileId, hrId],
+        );
+      } catch (e) {
+        if (e && e.code === "42P01") {
+          return res.status(503).json({ error: "CV analyser job migration not applied" });
+        }
+        throw e;
+      }
+      if (jobRes.rows.length === 0) {
+        return res.status(404).json({ error: "Job profile not found" });
+      }
+      const jobRow = jobRes.rows[0];
       const settled = await Promise.allSettled(
-        files.map((f) => processOneFile(f, hrId)),
+        files.map((f) => processOneFile(f, hrId, jobRow)),
       );
       let aiUnavailable = false;
       const results = settled.map((s, i) => {
@@ -406,6 +566,12 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       "years_experience",
       "verdict",
       "summary",
+      "overall_fit_score",
+      "technical_score",
+      "experience_score",
+      "education_score",
+      "culture_score",
+      "fit_summary",
       "strengths",
       "gaps",
       "skills",
@@ -424,6 +590,12 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
           esc(a.yearsExperience),
           esc(a.verdict),
           esc(a.summary),
+          esc(a.overallFitScore),
+          esc(a.technicalScore),
+          esc(a.experienceScore),
+          esc(a.educationScore),
+          esc(a.cultureScore),
+          esc(a.fitSummary),
           esc(Array.isArray(a.strengths) ? a.strengths.join("; ") : ""),
           esc(Array.isArray(a.gaps) ? a.gaps.join("; ") : ""),
           esc(Array.isArray(a.skills) ? a.skills.join("; ") : ""),
