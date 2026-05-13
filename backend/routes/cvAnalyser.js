@@ -99,6 +99,38 @@ Detail: ${safeDetail}
 No machine-readable CV body was extracted (common for infographic or image-heavy PDFs). You must still output ONLY valid JSON matching the exact schema. In summary (2 sentences max), state clearly that no resume text could be extracted from the file. Do not invent employers, degrees, dates, or job titles. candidateName: use "Unknown" unless the filename alone plausibly encodes a person's name. email, phone, currentRole, yearsExperience: null unless clearly parseable from the filename. strengths: exactly 3 strings, each stating a specific limitation due to missing text (no fabricated strengths). gaps: exactly 3 strings, honest data gaps. skills: at most 8 items; use only tokens clearly suggested by the filename, otherwise an empty array. education: empty array if unknown. redFlags: include that no CV text could be extracted. verdict: use "fresher" if there is no evidence to classify higher.`;
   }
 
+  async function resolveRecruitmentJobId(raw) {
+    if (raw == null) return null;
+    const s = String(raw).trim();
+    if (!s) return null;
+    const id = s.slice(0, 64);
+    const r = await pool.query(`SELECT id FROM job WHERE id = $1`, [id]);
+    return r.rows.length ? r.rows[0].id : null;
+  }
+
+  /** If recruitment_job_id column is missing (42703), list without it. */
+  async function listCvAnalyserJobsForHr(hrId) {
+    const withRec = `SELECT id, title, company_name AS "companyName", designation, location, description,
+                recruitment_job_id AS "recruitmentJobId",
+                EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"
+         FROM cv_analyser_job WHERE hr_id = $1 ORDER BY updated_at DESC`;
+    const noRec = `SELECT id, title, company_name AS "companyName", designation, location, description,
+                EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"
+         FROM cv_analyser_job WHERE hr_id = $1 ORDER BY updated_at DESC`;
+    try {
+      const r = await pool.query(withRec, [hrId]);
+      return r.rows;
+    } catch (e) {
+      if (e && e.code === "42703") {
+        const r = await pool.query(noRec, [hrId]);
+        return r.rows.map((row) => ({ ...row, recruitmentJobId: null }));
+      }
+      throw e;
+    }
+  }
+
   function jobContextHashFromRow(row) {
     if (!row) return "";
     const canonical = JSON.stringify({
@@ -330,16 +362,25 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
     };
   }
 
-  router.get("/jobs", requireHR, async (req, res) => {
+  router.get("/recruitment-jobs", requireHR, async (_req, res) => {
     try {
       const r = await pool.query(
-        `SELECT id, title, company_name AS "companyName", designation, location, description,
-                EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
-                EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"
-         FROM cv_analyser_job WHERE hr_id = $1 ORDER BY updated_at DESC`,
-        [req.hrId],
+        `SELECT id, title, designation, location FROM job ORDER BY title ASC`,
       );
       res.json({ jobs: r.rows });
+    } catch (e) {
+      console.error(e);
+      if (e && e.code === "42P01") {
+        return res.status(503).json({ error: "job table missing" });
+      }
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
+  router.get("/jobs", requireHR, async (req, res) => {
+    try {
+      const rows = await listCvAnalyserJobsForHr(req.hrId);
+      res.json({ jobs: rows });
     } catch (e) {
       console.error(e);
       if (e && e.code === "42P01") {
@@ -381,15 +422,40 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
     const designation = String(b.designation || "").trim();
     const location = String(b.location || "Mumbai").trim() || "Mumbai";
     const description = String(b.description || "").trim();
+    let recruitmentJobId = null;
+    if (Object.prototype.hasOwnProperty.call(b, "recruitmentJobId")) {
+      recruitmentJobId = await resolveRecruitmentJobId(b.recruitmentJobId);
+      if (b.recruitmentJobId != null && String(b.recruitmentJobId).trim() !== "" && !recruitmentJobId) {
+        return res.status(400).json({ error: "recruitmentJobId must be a valid careers job id" });
+      }
+    }
     try {
-      const ins = await pool.query(
-        `INSERT INTO cv_analyser_job (hr_id, title, company_name, designation, location, description)
-         VALUES ($1,$2,$3,$4,$5,$6)
-         RETURNING id, title, company_name AS "companyName", designation, location, description,
-                   EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
-                   EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
-        [req.hrId, title, companyName, designation, location, description],
-      );
+      let ins;
+      try {
+        ins = await pool.query(
+          `INSERT INTO cv_analyser_job (hr_id, title, company_name, designation, location, description, recruitment_job_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)
+           RETURNING id, title, company_name AS "companyName", designation, location, description,
+                     recruitment_job_id AS "recruitmentJobId",
+                     EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                     EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+          [req.hrId, title, companyName, designation, location, description, recruitmentJobId],
+        );
+      } catch (e2) {
+        if (e2 && e2.code === "42703") {
+          ins = await pool.query(
+            `INSERT INTO cv_analyser_job (hr_id, title, company_name, designation, location, description)
+             VALUES ($1,$2,$3,$4,$5,$6)
+             RETURNING id, title, company_name AS "companyName", designation, location, description,
+                       EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                       EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+            [req.hrId, title, companyName, designation, location, description],
+          );
+          ins.rows[0].recruitmentJobId = null;
+        } else {
+          throw e2;
+        }
+      }
       res.status(201).json(ins.rows[0]);
     } catch (e) {
       console.error(e);
@@ -415,20 +481,63 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       const designation = b.designation != null ? String(b.designation).trim() : null;
       const location = b.location != null ? String(b.location).trim() : null;
       const description = b.description != null ? String(b.description).trim() : null;
-      const upd = await pool.query(
-        `UPDATE cv_analyser_job SET
-           title = COALESCE($1, title),
-           company_name = COALESCE($2, company_name),
-           designation = COALESCE($3, designation),
-           location = COALESCE($4, location),
-           description = COALESCE($5, description),
-           updated_at = NOW()
-         WHERE id = $6 AND hr_id = $7
-         RETURNING id, title, company_name AS "companyName", designation, location, description,
-                   EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
-                   EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
-        [title, companyName, designation, location, description, id, req.hrId],
-      );
+      const hasRec = Object.prototype.hasOwnProperty.call(b, "recruitmentJobId");
+      let recruitmentJobIdVal = null;
+      if (hasRec) {
+        recruitmentJobIdVal = await resolveRecruitmentJobId(b.recruitmentJobId);
+        if (b.recruitmentJobId != null && String(b.recruitmentJobId).trim() !== "" && !recruitmentJobIdVal) {
+          return res.status(400).json({ error: "recruitmentJobId must be a valid careers job id" });
+        }
+      }
+      let upd;
+      try {
+        upd = await pool.query(
+          `UPDATE cv_analyser_job SET
+             title = COALESCE($1, title),
+             company_name = COALESCE($2, company_name),
+             designation = COALESCE($3, designation),
+             location = COALESCE($4, location),
+             description = COALESCE($5, description),
+             recruitment_job_id = CASE WHEN $8::boolean THEN $9 ELSE recruitment_job_id END,
+             updated_at = NOW()
+           WHERE id = $6 AND hr_id = $7
+           RETURNING id, title, company_name AS "companyName", designation, location, description,
+                     recruitment_job_id AS "recruitmentJobId",
+                     EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                     EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+          [
+            title,
+            companyName,
+            designation,
+            location,
+            description,
+            id,
+            req.hrId,
+            hasRec,
+            recruitmentJobIdVal,
+          ],
+        );
+      } catch (e2) {
+        if (e2 && e2.code === "42703") {
+          upd = await pool.query(
+            `UPDATE cv_analyser_job SET
+               title = COALESCE($1, title),
+               company_name = COALESCE($2, company_name),
+               designation = COALESCE($3, designation),
+               location = COALESCE($4, location),
+               description = COALESCE($5, description),
+               updated_at = NOW()
+             WHERE id = $6 AND hr_id = $7
+             RETURNING id, title, company_name AS "companyName", designation, location, description,
+                       EXTRACT(EPOCH FROM created_at)*1000 AS "createdAt",
+                       EXTRACT(EPOCH FROM updated_at)*1000 AS "updatedAt"`,
+            [title, companyName, designation, location, description, id, req.hrId],
+          );
+          upd.rows[0].recruitmentJobId = null;
+        } else {
+          throw e2;
+        }
+      }
       res.json(upd.rows[0]);
     } catch (e) {
       console.error(e);

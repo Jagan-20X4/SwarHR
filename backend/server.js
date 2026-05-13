@@ -29,14 +29,26 @@ const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const UPSTREAM = "https://api.anthropic.com/v1/messages";
 
 const app = express();
+
+function corsAllowedOrigins() {
+  const base = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+  ];
+  const extra = process.env.CORS_ORIGINS && String(process.env.CORS_ORIGINS).trim();
+  if (!extra) return base;
+  const more = extra
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return [...base, ...more];
+}
+
 app.use(
   cors({
-    origin: [
-      "http://localhost:3000",
-      "http://127.0.0.1:3000",
-      "http://localhost:5173",
-      "http://127.0.0.1:5173",
-    ],
+    origin: corsAllowedOrigins(),
     credentials: true,
   }),
 );

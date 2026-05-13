@@ -36,10 +36,19 @@
   </script>
   <script type="module">
     window.__ATS_URL__ = import.meta.env.VITE_ATS_URL ?? "";
+    /** Public careers site origin for invite links (emails). Set VITE_PUBLIC_APP_URL in frontend/.env — unset uses current tab origin. */
+    window.__PUBLIC_APP_URL__ = (import.meta.env.VITE_PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
   </script>
 
   <script type="text/babel" data-presets="react">
     const { useState, useEffect, useRef, useCallback } = React;
+
+    /** Base URL for candidate-facing absolute links (invite emails). Uses VITE_PUBLIC_APP_URL when set, else window.location.origin. */
+    function publicAppOrigin() {
+      const raw = typeof window !== "undefined" ? window.__PUBLIC_APP_URL__ : "";
+      if (raw && String(raw).trim()) return String(raw).trim().replace(/\/+$/, "");
+      return typeof window !== "undefined" ? window.location.origin : "";
+    }
 
     async function callClaude(messages, system = "", json = false) {
       // If no API URL configured, return mock data (lets you preview the UI)
@@ -265,8 +274,24 @@
       if (path === "/hr") return { name: "hr", returnTo: ret };
       if (path === "/cv-analyser") return { name: "cvAnalyser", returnTo: ret };
       const m = path.match(/^\/jobs\/([^/]+)\/apply$/);
-      if (m) return { name: "apply", jobId: m[1], returnTo: ret };
+      if (m) {
+        const invite = q.get("invite") === "1" || q.get("invite") === "true";
+        return { name: "apply", jobId: m[1], returnTo: ret, invite };
+      }
       return { name: "home", returnTo: ret };
+    }
+
+    /** Match post-login returnTo like /jobs/{id}/apply or /jobs/{id}/apply?invite=1 */
+    function matchJobsApplyDest(dest) {
+      if (!dest || typeof dest !== "string") return null;
+      const qIdx = dest.indexOf("?");
+      const pathOnly = qIdx >= 0 ? dest.slice(0, qIdx) : dest;
+      const qs = qIdx >= 0 ? dest.slice(qIdx + 1) : "";
+      const m = pathOnly.match(/^\/jobs\/([^/]+)\/apply$/);
+      if (!m) return null;
+      const params = new URLSearchParams(qs);
+      const invite = params.get("invite") === "1" || params.get("invite") === "true";
+      return { jobId: m[1], invite };
     }
 
     function getHrExternalConfig() {
@@ -479,6 +504,14 @@
     function applicationHasReattemptHistory(app) {
       const rs = app?.reattemptRequestStatus || "none";
       return rs !== "none";
+    }
+
+    /** Voice interview finished for this application — HR decision is scoped to after this. */
+    function applicationVoiceInterviewCompleted(app) {
+      if (!app) return false;
+      if (app.interviewCompletionStatus === "completed") return true;
+      if (app.interviewCompletedAt) return true;
+      return false;
     }
 
     function portalStatusLabel(c, jobId) {
@@ -963,10 +996,13 @@
       }, [candidate.id, candidate.jobId, JSON.stringify((candidate.applicationHistory || []).map((a) => [a.applicationId, a.jobId]))]);
       const selectedAppRow = appliedList.find((a) => a.applicationId === selectedApplicationId) || null;
       useEffect(() => {
-        const appRm = selectedAppRow?.hrRemarks != null ? String(selectedAppRow.hrRemarks) : "";
-        if (appRm !== "") setRemarks(appRm);
-        else setRemarks(candidate.remarks || "");
-      }, [selectedApplicationId, candidate.id, candidate.remarks, selectedAppRow?.hrRemarks]);
+        if (selectedAppRow) {
+          const appRm = selectedAppRow.hrRemarks != null ? String(selectedAppRow.hrRemarks) : "";
+          setRemarks(appRm);
+        } else {
+          setRemarks(candidate.remarks || "");
+        }
+      }, [selectedApplicationId, candidate.id, candidate.remarks, selectedAppRow]);
       const bubbleTranscript = transcriptLinesForApplication(candidate, selectedApplicationId);
       const analysisForSelected = selectedAppRow?.analysis || candidate.analysis;
       const setStatus = (s) => {
@@ -977,7 +1013,6 @@
               hrRemarks: remarks,
             }),
             status: s,
-            remarks,
           });
         } else {
           onUpdate({ status: s, remarks });
@@ -2002,8 +2037,44 @@
       return m[v] || (v ? String(v) : "—");
     }
 
-    function CVResultCard({ row }) {
+    function buildCvAnalyserInviteEmail({ candidateName, jobTitle, interviewLink }) {
+      const cn = (candidateName && String(candidateName).trim()) || "Candidate";
+      const jt = (jobTitle && String(jobTitle).trim()) || "the position";
+      const link = (interviewLink && String(interviewLink).trim()) || "";
+      const subject = "Thank You for Applying – Next Step: AI Interview";
+      const body = `Dear ${cn},
+
+Thank you for applying for the ${jt} position at Indira IVF Hospital Ltd.
+
+As the first step in our hiring process, you are required to complete an AI‑based interview. Please use the details below to access and complete your interview within 72 hours.
+
+AI Interview Link: ${link}
+
+Important guidelines for your AI interview
+
+To ensure your responses are captured accurately by the AI system, please make sure to:
+
+· Sit in a well-lit area with a plain white or light-coloured background
+
+· Ensure stable internet connectivity throughout the interview
+
+· Choose a quiet location with minimal background noise
+
+· Use a device with a properly functioning camera and microphone
+
+· Speak clearly and at a natural pace, and answer each question in full before moving ahead
+
+· Avoid interruptions, as the AI interview works best when completed in one continuous session
+
+Following these guidelines will help the system accurately evaluate your responses.
+
+Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the very best in the process.`;
+      return { subject, body };
+    }
+
+    function CVResultCard({ row, jobTitle, inviteUrl }) {
       const [open, setOpen] = useState(false);
+      const [inviteModal, setInviteModal] = useState(false);
       if (row.loading) {
         return (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-8 flex items-center justify-center gap-3">
@@ -2022,6 +2093,22 @@
       }
       const a = row.analysis || {};
       const initial = (a.candidateName && String(a.candidateName).trim()[0]) || "?";
+      const canInvite = Boolean(inviteUrl && String(inviteUrl).trim());
+      const candLabel = a.candidateName && String(a.candidateName).trim() ? String(a.candidateName).trim() : "Candidate";
+      const jtLabel = jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : "the position";
+      const { subject: inviteSubject, body: inviteBody } = buildCvAnalyserInviteEmail({
+        candidateName: candLabel,
+        jobTitle: jtLabel,
+        interviewLink: inviteUrl || "",
+      });
+      const copyFullEmail = () => {
+        const text = `Subject: ${inviteSubject}\n\n${inviteBody}`;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => window.alert("Copied full email to clipboard.")).catch(() => window.alert("Could not copy."));
+        } else {
+          window.prompt("Copy this email:", text);
+        }
+      };
       return (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
           <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
@@ -2086,9 +2173,20 @@
               <span key={sk} className="text-xs font-medium bg-slate-100 text-slate-700 px-2 py-1 rounded-full">{sk}</span>
             ))}
           </div>
-          <button type="button" onClick={() => setOpen((o) => !o)} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">
-            {open ? "Hide details" : "Show details"}
-          </button>
+          <div className="flex flex-wrap items-center gap-3 mb-2">
+            <button
+              type="button"
+              disabled={!canInvite}
+              title={canInvite ? "Open email draft with interview link" : "Link a careers job in Job Master (Careers job — interview invite link) and save."}
+              onClick={() => canInvite && setInviteModal(true)}
+              className={`text-xs font-bold px-4 py-2 rounded-xl border transition-colors ${canInvite ? "border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100" : "border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"}`}
+            >
+              Sent invite
+            </button>
+            <button type="button" onClick={() => setOpen((o) => !o)} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">
+              {open ? "Hide details" : "Show details"}
+            </button>
+          </div>
           {open ? (
             <div className="mt-3 pt-3 border-t border-slate-100 text-sm text-slate-700 space-y-2">
               <div>
@@ -2103,11 +2201,24 @@
               ) : null}
             </div>
           ) : null}
+          {inviteModal ? (
+            <Modal title="Interview invite email" onClose={() => setInviteModal(false)} wide>
+              <p className="text-xs text-slate-500 mb-3">Copy into your email client. Interview link base: <span className="font-mono text-[11px]">{publicAppOrigin()}</span> (set <span className="font-mono text-[10px]">VITE_PUBLIC_APP_URL</span> in <span className="font-mono text-[10px]">frontend/.env</span> for production; otherwise uses this tab&apos;s origin).</p>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Subject</label>
+              <input readOnly className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-3 bg-slate-50" value={inviteSubject} onFocus={(e) => e.target.select()} />
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Body</label>
+              <textarea readOnly rows={20} className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed mb-4" value={inviteBody} onFocus={(e) => e.target.select()} />
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={copyFullEmail} className="px-4 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold">Copy subject + body</button>
+                <button type="button" onClick={() => setInviteModal(false)} className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-bold">Close</button>
+              </div>
+            </Modal>
+          ) : null}
         </div>
       );
     }
 
-    function CVAnalyserPage({ onBack, onSynced }) {
+    function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
       const inputRef = useRef(null);
       const [staged, setStaged] = useState([]);
       const [results, setResults] = useState([]);
@@ -2116,16 +2227,17 @@
       const [cvJobs, setCvJobs] = useState([]);
       const [jobsLoading, setJobsLoading] = useState(true);
       const [selectedJobId, setSelectedJobId] = useState(null);
+      const [selectedCareersJobId, setSelectedCareersJobId] = useState(null);
+      const [recruitmentJobs, setRecruitmentJobs] = useState([]);
       const [jobForm, setJobForm] = useState({
         title: "",
         companyName: "Indira IVF",
         designation: "",
         location: "Mumbai",
         description: "",
+        recruitmentJobId: "",
       });
-      const [draftRole, setDraftRole] = useState("");
       const [saveJobBusy, setSaveJobBusy] = useState(false);
-      const [draftBusy, setDraftBusy] = useState(false);
 
       const defaultJobForm = () => ({
         title: "",
@@ -2133,6 +2245,7 @@
         designation: "",
         location: "Mumbai",
         description: "",
+        recruitmentJobId: "",
       });
 
       const loadJobs = async () => {
@@ -2146,19 +2259,40 @@
             return;
           }
           if (!res.ok) {
-            setCvJobs([]);
+            setBanner(data.error || `Could not load saved jobs (${res.status}). The list was not cleared — try Refresh list.`);
             return;
           }
-          setCvJobs(data.jobs || []);
+          const list = data.jobs || [];
+          setCvJobs(list);
+          setSelectedJobId((sid) => {
+            if (sid == null) return null;
+            return list.some((x) => Number(x.id) === Number(sid)) ? sid : null;
+          });
+          setSelectedCareersJobId((cid) => {
+            if (cid == null) return null;
+            return list.some((x) => String(x.recruitmentJobId) === String(cid)) ? cid : null;
+          });
         } catch {
-          setCvJobs([]);
+          setBanner("Could not reach server to load saved jobs.");
         } finally {
           setJobsLoading(false);
         }
       };
 
+      const loadRecruitmentJobs = async () => {
+        try {
+          const res = await fetch("/api/admin/cv-analyser/recruitment-jobs", { headers: { ...authHeaders() } });
+          const data = await res.json().catch(() => ({}));
+          if (res.ok) setRecruitmentJobs(data.jobs || []);
+          else setRecruitmentJobs([]);
+        } catch {
+          setRecruitmentJobs([]);
+        }
+      };
+
       useEffect(() => {
         loadJobs();
+        loadRecruitmentJobs();
       }, []);
 
       const applyJobToForm = (j) => {
@@ -2168,25 +2302,105 @@
           designation: j.designation || "",
           location: j.location || "Mumbai",
           description: j.description || "",
+          recruitmentJobId: j.recruitmentJobId != null && j.recruitmentJobId !== "" ? String(j.recruitmentJobId) : "",
         });
       };
 
-      const onSelectJob = (e) => {
-        const v = e.target.value;
-        if (!v) {
+      const onSelectJob = async (e) => {
+        const jid = e.target.value;
+        if (!jid) {
+          setSelectedCareersJobId(null);
           setSelectedJobId(null);
           return;
         }
-        const id = parseInt(v, 10);
-        if (!Number.isFinite(id)) return;
-        setSelectedJobId(id);
-        const j = cvJobs.find((x) => x.id === id);
-        if (j) applyJobToForm(j);
+        const job = (boardJobs || []).find((x) => String(x.id) === String(jid));
+        if (!job) return;
+        const nextForm = {
+          ...jobForm,
+          title: job.title || "",
+          designation: job.designation || "",
+          description: job.description || "",
+          recruitmentJobId: jid,
+        };
+        setJobForm(nextForm);
+        setBanner("");
+        const existingCv = cvJobs.find((c) => String(c.recruitmentJobId) === String(jid));
+        setSaveJobBusy(true);
+        try {
+          const out = await persistJobPosting(nextForm, existingCv?.id ?? null);
+          if (!out.ok) {
+            setBanner(out.error || "Could not save posting for analysis.");
+            return;
+          }
+          setSelectedCareersJobId(jid);
+          await loadJobs();
+          try {
+            if (typeof onSynced === "function") await onSynced();
+          } catch (_) {}
+          if (out.data && out.data.id != null) setSelectedJobId(out.data.id);
+          if (out.data) applyJobToForm(out.data);
+        } catch {
+          setBanner("Could not save posting.");
+        } finally {
+          setSaveJobBusy(false);
+        }
       };
 
       const startNewJob = () => {
         setSelectedJobId(null);
+        setSelectedCareersJobId(null);
         setJobForm(defaultJobForm());
+      };
+
+      const persistJobPosting = async (form, idForPatch) => {
+        const title = String(form.title || "").trim();
+        if (!title) return { ok: false, error: "Enter a job title before saving." };
+        const body = JSON.stringify({
+          title: String(form.title).trim(),
+          companyName: String(form.companyName || "Indira IVF").trim() || "Indira IVF",
+          designation: String(form.designation || "").trim(),
+          location: String(form.location || "Mumbai").trim() || "Mumbai",
+          description: String(form.description || "").trim(),
+          recruitmentJobId:
+            form.recruitmentJobId && String(form.recruitmentJobId).trim()
+              ? String(form.recruitmentJobId).trim()
+              : null,
+        });
+        const headers = { ...authHeaders(), "Content-Type": "application/json" };
+        try {
+          if (idForPatch != null) {
+            const res = await fetch(`/api/admin/cv-analyser/jobs/${idForPatch}`, {
+              method: "PATCH",
+              headers,
+              body,
+            });
+            const data = await res.json().catch(() => ({}));
+            if (res.status === 404) {
+              const res2 = await fetch("/api/admin/cv-analyser/jobs", {
+                method: "POST",
+                headers,
+                body,
+              });
+              const data2 = await res2.json().catch(() => ({}));
+              if (!res2.ok) {
+                return { ok: false, error: data2.error || "Could not save job posting." };
+              }
+              return { ok: true, data: data2, recreated: true };
+            }
+            if (!res.ok) return { ok: false, error: data.error || "Could not save job posting." };
+            return { ok: true, data };
+          }
+          const res = await fetch("/api/admin/cv-analyser/jobs", {
+            method: "POST",
+            headers,
+            body,
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) return { ok: false, error: data.error || "Could not save job posting." };
+          return { ok: true, data };
+        } catch {
+          return { ok: false, error: "Could not save job posting." };
+        }
       };
 
       const saveJob = async () => {
@@ -2198,69 +2412,21 @@
         setSaveJobBusy(true);
         setBanner("");
         try {
-          const url = selectedJobId != null
-            ? `/api/admin/cv-analyser/jobs/${selectedJobId}`
-            : "/api/admin/cv-analyser/jobs";
-          const method = selectedJobId != null ? "PATCH" : "POST";
-          const res = await fetch(url, {
-            method,
-            headers: { ...authHeaders(), "Content-Type": "application/json" },
-            body: JSON.stringify({
-              title: jobForm.title.trim(),
-              companyName: jobForm.companyName.trim() || "Indira IVF",
-              designation: jobForm.designation.trim(),
-              location: jobForm.location.trim() || "Mumbai",
-              description: jobForm.description.trim(),
-            }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (!res.ok) {
-            setBanner(data.error || "Could not save job posting.");
+          const out = await persistJobPosting(jobForm, selectedJobId);
+          if (!out.ok) {
+            setBanner(out.error || "Could not save job posting.");
             return;
           }
           await loadJobs();
-          if (data.id != null) setSelectedJobId(data.id);
-          applyJobToForm(data);
+          if (out.data && out.data.id != null) setSelectedJobId(out.data.id);
+          if (out.data) applyJobToForm(out.data);
+          if (out.data && out.data.recruitmentJobId != null && String(out.data.recruitmentJobId).trim() !== "") {
+            setSelectedCareersJobId(String(out.data.recruitmentJobId));
+          }
         } catch {
           setBanner("Could not save job posting.");
         } finally {
           setSaveJobBusy(false);
-        }
-      };
-
-      const generateDraft = async () => {
-        const role = draftRole.trim();
-        if (!role) {
-          setBanner("Enter a role name for the AI draft (e.g. Senior Embryologist).");
-          return;
-        }
-        setDraftBusy(true);
-        setBanner("");
-        try {
-          const res = await fetch("/api/admin/cv-analyser/jobs/generate-draft", {
-            method: "POST",
-            headers: { ...authHeaders(), "Content-Type": "application/json" },
-            body: JSON.stringify({ roleTitle: role }),
-          });
-          const data = await res.json().catch(() => ({}));
-          if (res.status === 503) {
-            setBanner("AI service unavailable for draft generation.");
-            return;
-          }
-          if (!res.ok) {
-            setBanner(data.error || "Draft generation failed.");
-            return;
-          }
-          setJobForm((p) => ({
-            ...p,
-            title: data.title || p.title,
-            designation: data.designation != null ? data.designation : p.designation,
-            description: data.description != null ? data.description : p.description,
-          }));
-        } catch {
-          setBanner("Could not generate draft.");
-        } finally {
-          setDraftBusy(false);
         }
       };
 
@@ -2370,6 +2536,17 @@
       };
 
       const okCount = (results || []).filter((r) => r.status === "ok").length;
+      const selectedCvJobRow = selectedJobId != null ? cvJobs.find((x) => x.id === selectedJobId) : null;
+      const inviteJobTitle =
+        (jobForm.title && jobForm.title.trim()) || selectedCvJobRow?.title || "";
+      const inviteRecruitmentId =
+        (jobForm.recruitmentJobId && String(jobForm.recruitmentJobId).trim()) ||
+        (selectedCvJobRow?.recruitmentJobId != null && String(selectedCvJobRow.recruitmentJobId).trim()) ||
+        "";
+      const inviteApplyUrl =
+        typeof window !== "undefined" && inviteRecruitmentId
+          ? `${publicAppOrigin()}/jobs/${encodeURIComponent(inviteRecruitmentId)}/apply?invite=1`
+          : "";
 
       return (
         <div className="min-h-screen bg-slate-50">
@@ -2379,36 +2556,39 @@
           </div>
           <div className="max-w-4xl mx-auto px-6 py-8">
             <h1 className="text-3xl font-black text-slate-900 mb-1">CV Analyser</h1>
-            <p className="text-slate-500 mb-6">Define or pick a job posting (JD), then upload CVs. Each CV is analysed and scored against that JD.</p>
+            <p className="text-slate-500 mb-6">Pick a role from Job Master (HR Job Postings), then upload CVs. Each CV is scored against the Description field as JD.</p>
             <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
                 <h2 className="text-lg font-black text-slate-900">Job Master</h2>
                 <div className="flex flex-wrap gap-2">
-                  <button type="button" disabled={jobsLoading || saveJobBusy} onClick={() => loadJobs()} className="text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50">Refresh list</button>
+                  <button
+                    type="button"
+                    disabled={jobsLoading || saveJobBusy}
+                    onClick={async () => {
+                      await loadJobs();
+                      try {
+                        if (typeof onSynced === "function") await onSynced();
+                      } catch (_) {}
+                    }}
+                    className="text-xs font-bold px-3 py-1.5 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                  >
+                    Refresh list
+                  </button>
                   <button type="button" disabled={saveJobBusy} onClick={startNewJob} className="text-xs font-bold px-3 py-1.5 rounded-lg bg-slate-100 text-slate-800 hover:bg-slate-200">New job</button>
                 </div>
               </div>
-              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Saved job posting</label>
+              <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Job posting (Job Master)</label>
               <select
-                value={selectedJobId != null ? String(selectedJobId) : ""}
+                value={selectedCareersJobId != null ? String(selectedCareersJobId) : ""}
                 onChange={onSelectJob}
-                disabled={jobsLoading}
+                disabled={jobsLoading || saveJobBusy}
                 className="w-full mb-4 px-3 py-2.5 rounded-xl border border-slate-200 text-slate-900 text-sm bg-white disabled:opacity-50"
               >
-                <option value="">— Select a saved job —</option>
-                {(cvJobs || []).map((j) => (
+                <option value="">— Select a role —</option>
+                {(boardJobs || []).map((j) => (
                   <option key={j.id} value={String(j.id)}>{j.title}{j.location ? ` · ${j.location}` : ""}</option>
                 ))}
               </select>
-              <div className="flex flex-wrap items-end gap-2 mb-4">
-                <div className="flex-1 min-w-[180px]">
-                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">AI draft from role name</label>
-                  <input value={draftRole} onChange={(e) => setDraftRole(e.target.value)} placeholder="Role title for draft" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm" />
-                </div>
-                <button type="button" disabled={draftBusy || saveJobBusy} onClick={generateDraft} className="px-4 py-2 rounded-xl bg-teal-700 hover:bg-teal-600 text-white text-sm font-bold disabled:opacity-40">
-                  {draftBusy ? "Drafting…" : "Generate draft"}
-                </button>
-              </div>
               <div className="grid sm:grid-cols-2 gap-3 mb-3">
                 <div className="sm:col-span-2">
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Job title</label>
@@ -2430,6 +2610,20 @@
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Job description (JD)</label>
                   <textarea value={jobForm.description} onChange={(e) => setJobForm((p) => ({ ...p, description: e.target.value }))} rows={5} placeholder="Responsibilities, must-have skills, clinic context…" className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm resize-y min-h-[120px]" />
                 </div>
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Careers job — interview invite link</label>
+                  <p className="text-xs text-slate-500 mb-2">Maps this CV-analyser posting to a role on the careers board so <strong className="font-semibold text-slate-700">Sent invite</strong> can include <span className="font-mono text-[11px]">/jobs/&lt;id&gt;/apply?invite=1</span> for the AI interview.</p>
+                  <select
+                    value={jobForm.recruitmentJobId || ""}
+                    onChange={(e) => setJobForm((p) => ({ ...p, recruitmentJobId: e.target.value }))}
+                    className="w-full px-3 py-2.5 rounded-xl border border-slate-200 text-sm bg-white"
+                  >
+                    <option value="">— Not linked —</option>
+                    {(recruitmentJobs || []).map((j) => (
+                      <option key={j.id} value={j.id}>{j.title}{j.location ? ` · ${j.location}` : ""}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
               <div className="flex flex-wrap items-center gap-3 pt-4 border-t border-slate-100">
                 <button type="button" disabled={saveJobBusy} onClick={saveJob} className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-bold disabled:opacity-40">
@@ -2437,9 +2631,9 @@
                 </button>
                 <p className="text-xs text-slate-500">
                   {selectedJobId != null ? (
-                    <>Job #{selectedJobId} selected. Analysis uses the last saved JD — save after you edit fields.</>
+                    <>Profile #{selectedJobId} — JD from Job Master Description; edit fields and Save if needed before analysing CVs.</>
                   ) : (
-                    <>Save a job posting, then select it above to analyse CVs.</>
+                    <>Pick a Job Master role above (loads title, designation, JD from HR Job Postings). Then analyse CVs.</>
                   )}
                 </p>
               </div>
@@ -2488,7 +2682,14 @@
                   </div>
                 </div>
                 <div className="space-y-4">
-                  {results.map((row, i) => <CVResultCard key={row.fileId || row.filename + "-" + i} row={row} />)}
+                  {results.map((row, i) => (
+                    <CVResultCard
+                      key={row.fileId || row.filename + "-" + i}
+                      row={row}
+                      jobTitle={inviteJobTitle}
+                      inviteUrl={inviteApplyUrl}
+                    />
+                  ))}
                 </div>
               </div>
             ) : null}
@@ -3135,7 +3336,7 @@
       return [{ role: "user", content: `Analyse for "${jdTitle}". Transcript:\n${tx}\n\nReturn JSON: {"summary":"3 sentences","strengths":["s1","s2","s3"],"areas":["a1","a2","a3"],"tech":7,"comm":8,"rec":"Hire"}` }];
     }
 
-    function Analysis({ context, transcript, savedAnalysis, roleTabs, selectedApplicationId, onSelectApplication, initialRemarks, onDecision, onBack, onLogout }) {
+    function Analysis({ context, transcript, savedAnalysis, roleTabs, selectedApplicationId, onSelectApplication, initialRemarks, onDecision, onBack, onLogout, hrDecisionAllowed = true }) {
       const [data, setData] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null), [remarks, setRemarks] = useState(initialRemarks || "");
       const autoClaudeConsumedRef = useRef(false);
       const tabs = roleTabs || [];
@@ -3152,7 +3353,7 @@
           setErr(null);
           setData({
             summary:
-              "No AI interview transcript is stored for this role yet. Complete or schedule a voice interview to generate automated scores. You can still record an HR decision below for this application.",
+              "No AI interview transcript is stored for this role yet. Complete or schedule a voice interview to generate automated scores.",
             tech: null,
             comm: null,
             rec: "Pending review",
@@ -3197,7 +3398,7 @@
         setErr(null);
         setData({
           summary:
-            "AI summary has not been generated for this role yet. Use “Generate AI summary” below, or record your HR decision without it.",
+            "AI summary has not been generated for this role yet. Use “Generate AI summary” below (optional).",
           tech: null,
           comm: null,
           rec: "Pending review",
@@ -3266,11 +3467,18 @@
                 <div className="bg-white rounded-2xl border border-slate-100 p-6"><h3 className="text-xs font-black text-amber-600 uppercase mb-4">Improvements</h3><ul className="space-y-2">{(data.areas || []).map((a, i) => <li key={i} className="flex gap-2 text-sm text-slate-700"><span className="text-amber-500 font-bold">•</span>{a}</li>)}</ul></div>
               </div>
             ) : null}
+            {!hrDecisionAllowed ? (
+              <div className="bg-slate-100 border border-slate-200 rounded-2xl p-5 text-sm text-slate-700">
+                <p className="font-bold text-slate-900 mb-1">HR decision locked</p>
+                <p className="text-slate-600">Reject / Shortlist unlocks only after the candidate completes the voice interview for this role (interviewed).</p>
+              </div>
+            ) : (
             <div className="bg-white rounded-2xl border border-slate-100 p-6">
               <h3 className="text-xs font-black text-slate-400 uppercase mb-3">HR Decision</h3>
               <textarea rows={3} value={remarks} onChange={e => setRemarks(e.target.value)} placeholder="Final remarks…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
               <div className="flex gap-3"><button type="button" onClick={() => onDecision("REJECTED", remarks, decisionPayload)} className="flex-1 py-3 border-2 border-red-100 text-red-600 font-bold rounded-xl">Reject</button><button type="button" onClick={() => onDecision("SHORTLISTED", remarks, decisionPayload)} className="flex-1 py-3 bg-green-600 text-white font-bold rounded-xl">Shortlist ✓</button></div>
             </div>
+            )}
             <button type="button" onClick={onBack} className="w-full py-3 border border-slate-200 text-slate-500 font-bold rounded-xl">← Back</button>
           </div>
         </div>
@@ -3296,8 +3504,9 @@
       const iv = job ? interviewEligibleForJob(candidate, focusJobId) : { ok: false };
       const roleLab = focusJobId ? portalStatusLabel(candidate, focusJobId) : "—";
       const hrNote =
-        (latestApp?.hrRemarks && String(latestApp.hrRemarks).trim()) ||
-        (focusJobId === candidate.jobId ? (candidate.remarks || "").trim() : "");
+        latestApp?.hrRemarks != null && String(latestApp.hrRemarks).trim()
+          ? String(latestApp.hrRemarks).trim()
+          : "";
       const [rrCode, setRrCode] = useState("TECH_NETWORK");
       const [rrText, setRrText] = useState("");
       const [rrBusy, setRrBusy] = useState(false);
@@ -3594,8 +3803,10 @@
               setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent("/portal") });
               setStep("LOGIN");
             } else if (rt.name === "apply" && (r0 !== "candidate" || !tok)) {
-              window.history.replaceState({}, "", "/login?returnTo=" + encodeURIComponent("/jobs/" + rt.jobId + "/apply"));
-              setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent("/jobs/" + rt.jobId + "/apply") });
+              const applyDest =
+                "/jobs/" + rt.jobId + "/apply" + (rt.invite ? "?invite=1" : "");
+              window.history.replaceState({}, "", "/login?returnTo=" + encodeURIComponent(applyDest));
+              setLoc({ path: "/login", search: "?returnTo=" + encodeURIComponent(applyDest) });
               setStep("LOGIN");
             } else if (rt.name === "apply" && r0 === "candidate" && tok) {
               const pick = boardJobs.find((x) => x.id === rt.jobId);
@@ -3711,6 +3922,13 @@
               : analysisAppIds[0]
             : null
           : analysisApplicationId;
+      const analysisDecisionRow =
+        active && step === "ANALYSIS"
+          ? analysisRoleRows.length > 0 && resolvedAnalysisApplicationId != null
+            ? (active.applicationHistory || []).find((x) => x.applicationId === resolvedAnalysisApplicationId) || null
+            : getLatestAppForJob(active.applicationHistory || [], active.jobId)
+          : null;
+      const hrDecisionAllowedAnalysis = applicationVoiceInterviewCompleted(analysisDecisionRow);
       const analysisLegacyOk = Boolean(
         active && analysisRoleRows.length === 0 && active.transcript && active.transcript.length > 0,
       );
@@ -3850,18 +4068,18 @@
                 candidateLoginPreferHomeRef.current = false;
                 const sp = new URLSearchParams(window.location.search);
                 const dest = preferHome ? "/" : (sp.get("returnTo") || "/");
-                const applyMatch = dest.match(/^\/jobs\/([^/]+)\/apply$/);
-                if (applyMatch) {
+                const applyDest = matchJobsApplyDest(dest);
+                if (applyDest) {
                   const jr2 = await fetch("/api/jobs", { headers: { ...authHeaders() } });
                   if (jr2.ok) {
                     const jd2 = await jr2.json();
-                    const jj = (jd2.jobs || []).find((x) => x.id === applyMatch[1]);
+                    const jj = (jd2.jobs || []).find((x) => x.id === applyDest.jobId);
                     if (jj) setSelJob(jj);
                   }
                 }
                 navigate(dest);
                 if (dest === "/portal") setStep("PORTAL");
-                else if (applyMatch) setStep("CVUP");
+                else if (applyDest) setStep("CVUP");
                 else setStep("HOME");
               }}
               onHrSuccess={async ({ hrId, token }) => {
@@ -3880,7 +4098,12 @@
                 else if (dest === "/" || dest === "") setStep("HOME");
                 else setStep("HR");
               }}
-              onRegister={() => { navigate("/register"); setStep("CONSENT"); }}
+              onRegister={() => {
+                const sp = new URLSearchParams(window.location.search);
+                const r = sp.get("returnTo");
+                navigate("/register" + (r ? "?returnTo=" + encodeURIComponent(r) : ""));
+                setStep("CONSENT");
+              }}
               onForgot={() => setStep("FORGOT")}
             />
           )}
@@ -3897,7 +4120,9 @@
                   setStep("TP_SUBMIT");
                   return;
                 }
-                navigate("/login");
+                const sp = new URLSearchParams(window.location.search);
+                const r = sp.get("returnTo");
+                navigate("/login" + (r ? "?returnTo=" + encodeURIComponent(r) : ""));
                 setStep("LOGIN");
               }}
             />
@@ -3939,18 +4164,18 @@
               candidateLoginPreferHomeRef.current = false;
               const sp = new URLSearchParams(window.location.search);
               const dest = preferHome ? "/" : (sp.get("returnTo") || "/");
-              const applyMatch = dest.match(/^\/jobs\/([^/]+)\/apply$/);
-              if (applyMatch) {
+              const applyDest = matchJobsApplyDest(dest);
+              if (applyDest) {
                 const jr2 = await fetch("/api/jobs", { headers: { ...authHeaders() } });
                 if (jr2.ok) {
                   const jd2 = await jr2.json();
-                  const jj = (jd2.jobs || []).find((x) => x.id === applyMatch[1]);
+                  const jj = (jd2.jobs || []).find((x) => x.id === applyDest.jobId);
                   if (jj) setSelJob(jj);
                 }
               }
               navigate(dest);
               if (dest === "/portal") setStep("PORTAL");
-              else if (applyMatch) setStep("CVUP");
+              else if (applyDest) setStep("CVUP");
               else setStep("HOME");
             } catch (e) {
               alert("Could not reach server.");
@@ -3961,7 +4186,9 @@
               setStep("TP_SUBMIT");
               return;
             }
-            navigate("/login");
+            const sp = new URLSearchParams(window.location.search);
+            const r = sp.get("returnTo");
+            navigate("/login" + (r ? "?returnTo=" + encodeURIComponent(r) : ""));
             setStep("LOGIN");
           }}/>}
           {step === "HOME" && (
@@ -4030,7 +4257,7 @@
           {step === "AUDIT" && <AuditLogView auditLog={auditLog} onBack={() => setStep("HR")}/>}
           {step === "CV_ANALYSER" && (
             <HRBridge onLogout={logout}>
-              <CVAnalyserPage onBack={() => { navigate("/hr"); setStep("HR"); }} onSynced={syncStateFromServer} />
+              <CVAnalyserPage jobs={jobs} onBack={() => { navigate("/hr"); setStep("HR"); }} onSynced={syncStateFromServer} />
             </HRBridge>
           )}
           {step === "ANALYSIS" && analysisCanOpen && active && (
@@ -4070,6 +4297,7 @@
                 const row = (active.applicationHistory || []).find((x) => x.applicationId === resolvedAnalysisApplicationId);
                 return row?.hrRemarks != null ? String(row.hrRemarks) : "";
               })()}
+              hrDecisionAllowed={hrDecisionAllowedAnalysis}
               onDecision={(s, r, a) => {
                 const analysisToSave =
                   a && typeof a === "object"
@@ -4090,7 +4318,6 @@
                       analysis: analysisToSave,
                     }),
                     status: s,
-                    remarks: r,
                     analysis: analysisToSave,
                   });
                 } else {
@@ -4235,5 +4462,7 @@
 
     ReactDOM.createRoot(document.getElementById('root')).render(<App />);
   </script>
+</body>
+</html>
 </body>
 </html>

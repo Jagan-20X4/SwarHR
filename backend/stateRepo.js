@@ -49,17 +49,15 @@ function parseApplicationAiAnalysis(jsonVal) {
 }
 
 async function loadMeta(client) {
-  const [org, dpo, cats] = await Promise.all([
-    client.query(
-      "SELECT cooling_period_months, company_name, max_cv_upload_mb FROM organization_setting WHERE singleton = 1",
-    ),
-    client.query(
-      "SELECT full_name, title, email, phone FROM dpo_contact WHERE singleton = 1",
-    ),
-    client.query(
-      "SELECT code, label, items_summary, purpose, retention_note FROM data_processing_category ORDER BY code",
-    ),
-  ]);
+  const org = await client.query(
+    "SELECT cooling_period_months, company_name, max_cv_upload_mb FROM organization_setting WHERE singleton = 1",
+  );
+  const dpo = await client.query(
+    "SELECT full_name, title, email, phone FROM dpo_contact WHERE singleton = 1",
+  );
+  const cats = await client.query(
+    "SELECT code, label, items_summary, purpose, retention_note FROM data_processing_category ORDER BY code",
+  );
   const o = org.rows[0] || {};
   const d = dpo.rows[0] || {};
   return {
@@ -148,88 +146,80 @@ async function loadOneCandidate(client, id) {
   if (base.rows.length === 0) return null;
   const b = base.rows[0];
 
-  const [purposes, apps, grievRows, lines, analysis, strengths, areas, cv] =
-    await Promise.all([
-      client.query(
-        "SELECT purpose_code FROM candidate_purpose WHERE candidate_id = $1 ORDER BY purpose_code",
-        [id],
-      ),
-      (async () => {
-        try {
-          return await client.query(
-            `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
-                    interview_completion_status, reattempt_request_status,
-                    reattempt_candidate_reason_code, reattempt_candidate_reason_text,
-                    reattempt_hr_reason_code, reattempt_hr_notes,
-                    reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
-                    hr_remarks, hr_decision_status, ai_analysis_json
-             FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+  const purposes = await client.query(
+    "SELECT purpose_code FROM candidate_purpose WHERE candidate_id = $1 ORDER BY purpose_code",
+    [id],
+  );
+  let apps;
+  try {
+    apps = await client.query(
+      `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+              interview_completion_status, reattempt_request_status,
+              reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+              reattempt_hr_reason_code, reattempt_hr_notes,
+              reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
+              hr_remarks, hr_decision_status, ai_analysis_json
+       FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+      [id],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      try {
+        apps = await client.query(
+          `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+                  interview_completion_status, reattempt_request_status,
+                  reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+                  reattempt_hr_reason_code, reattempt_hr_notes,
+                  reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
+           FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+          [id],
+        );
+      } catch (e2) {
+        if (e2.code === "42703") {
+          apps = await client.query(
+            "SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
             [id],
           );
-        } catch (e) {
-          if (e.code === "42703") {
-            try {
-              return await client.query(
-                `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
-                        interview_completion_status, reattempt_request_status,
-                        reattempt_candidate_reason_code, reattempt_candidate_reason_text,
-                        reattempt_hr_reason_code, reattempt_hr_notes,
-                        reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
-                 FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
-                [id],
-              );
-            } catch (e2) {
-              if (e2.code === "42703") {
-                return await client.query(
-                  "SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at FROM application WHERE candidate_id = $1 ORDER BY applied_at",
-                  [id],
-                );
-              }
-              throw e2;
-            }
-          }
-          throw e;
-        }
-      })(),
-      client.query(
-        "SELECT body FROM grievance WHERE candidate_id = $1 ORDER BY created_at",
+        } else throw e2;
+      }
+    } else throw e;
+  }
+  const grievRows = await client.query(
+    "SELECT body FROM grievance WHERE candidate_id = $1 ORDER BY created_at",
+    [id],
+  );
+  let lines;
+  try {
+    lines = await client.query(
+      `SELECT application_id, role, content, line_index
+       FROM transcript_line WHERE candidate_id = $1
+       ORDER BY application_id NULLS FIRST, line_index`,
+      [id],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      lines = await client.query(
+        "SELECT role, content, line_index FROM transcript_line WHERE candidate_id = $1 ORDER BY line_index",
         [id],
-      ),
-      (async () => {
-        try {
-          return await client.query(
-            `SELECT application_id, role, content, line_index
-             FROM transcript_line WHERE candidate_id = $1
-             ORDER BY application_id NULLS FIRST, line_index`,
-            [id],
-          );
-        } catch (e) {
-          if (e.code === "42703") {
-            return await client.query(
-              "SELECT role, content, line_index FROM transcript_line WHERE candidate_id = $1 ORDER BY line_index",
-              [id],
-            );
-          }
-          throw e;
-        }
-      })(),
-      client.query(
-        "SELECT summary, tech_score, comm_score, recommendation_label FROM candidate_analysis WHERE candidate_id = $1",
-        [id],
-      ),
-      client.query(
-        "SELECT phrase FROM analysis_strength WHERE candidate_id = $1 ORDER BY sort_order, id",
-        [id],
-      ),
-      client.query(
-        "SELECT phrase FROM analysis_improvement_area WHERE candidate_id = $1 ORDER BY sort_order, id",
-        [id],
-      ),
-      client.query(
-        "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM cv_attachment WHERE candidate_id = $1 LIMIT 1",
-        [id],
-      ),
-    ]);
+      );
+    } else throw e;
+  }
+  const analysis = await client.query(
+    "SELECT summary, tech_score, comm_score, recommendation_label FROM candidate_analysis WHERE candidate_id = $1",
+    [id],
+  );
+  const strengths = await client.query(
+    "SELECT phrase FROM analysis_strength WHERE candidate_id = $1 ORDER BY sort_order, id",
+    [id],
+  );
+  const areas = await client.query(
+    "SELECT phrase FROM analysis_improvement_area WHERE candidate_id = $1 ORDER BY sort_order, id",
+    [id],
+  );
+  const cv = await client.query(
+    "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM cv_attachment WHERE candidate_id = $1 LIMIT 1",
+    [id],
+  );
 
   let analysisObj = null;
   if (analysis.rows.length > 0) {
@@ -386,24 +376,22 @@ async function loadTalentPool(client) {
   }
   const out = [];
   for (const e of entries.rows) {
-    const [roles, skills, cvf, maps] = await Promise.all([
-      client.query(
-        "SELECT role_name FROM talent_pool_desired_role WHERE talent_pool_id = $1 ORDER BY role_name",
-        [e.id],
-      ),
-      client.query(
-        "SELECT skill_name FROM talent_pool_skill WHERE talent_pool_id = $1 ORDER BY skill_name",
-        [e.id],
-      ),
-      client.query(
-        "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM talent_pool_cv_file WHERE talent_pool_id = $1",
-        [e.id],
-      ),
-      client.query(
-        "SELECT job_id, mapped_at, mapped_by_hr_id FROM talent_pool_job_mapping WHERE talent_pool_id = $1 ORDER BY mapped_at",
-        [e.id],
-      ),
-    ]);
+    const roles = await client.query(
+      "SELECT role_name FROM talent_pool_desired_role WHERE talent_pool_id = $1 ORDER BY role_name",
+      [e.id],
+    );
+    const skills = await client.query(
+      "SELECT skill_name FROM talent_pool_skill WHERE talent_pool_id = $1 ORDER BY skill_name",
+      [e.id],
+    );
+    const cvf = await client.query(
+      "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM talent_pool_cv_file WHERE talent_pool_id = $1",
+      [e.id],
+    );
+    const maps = await client.query(
+      "SELECT job_id, mapped_at, mapped_by_hr_id FROM talent_pool_job_mapping WHERE talent_pool_id = $1 ORDER BY mapped_at",
+      [e.id],
+    );
     const cvRow = cvf.rows[0];
     const cvFile = cvRow
       ? {
@@ -477,12 +465,10 @@ async function loadAppState(pool) {
   const client = await pool.connect();
   try {
     const meta = await loadMeta(client);
-    const [jobs, candidates, talentPool, auditLog] = await Promise.all([
-      loadJobs(client),
-      loadCandidates(client),
-      loadTalentPool(client),
-      loadAudit(client),
-    ]);
+    const jobs = await loadJobs(client);
+    const candidates = await loadCandidates(client);
+    const talentPool = await loadTalentPool(client);
+    const auditLog = await loadAudit(client);
     return { jobs, candidates, talentPool, auditLog, meta };
   } finally {
     client.release();
