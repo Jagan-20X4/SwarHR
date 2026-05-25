@@ -3,6 +3,7 @@ const crypto = require("crypto");
 const { voiceBotAuth, voiceBotTokenRoles } = require("../middleware/serviceToken");
 const { verify } = require("../jwt");
 const { getFallbackQuestionTexts } = require("../lib/fallbackQuestions");
+const { buildInterviewScriptFromRows } = require("../lib/interviewScript");
 
 function bearerHrId(req) {
   const h = req.headers.authorization;
@@ -100,6 +101,17 @@ async function interviewSessionAbandonCore(
   }
 }
 
+const INTERVIEW_DIFFICULTIES = new Set(["easy", "medium", "hard"]);
+function readInterviewDifficulty() {
+  const raw = String(process.env.INTERVIEW_DIFFICULTY || "").trim().toLowerCase();
+  return INTERVIEW_DIFFICULTIES.has(raw) ? raw : "medium";
+}
+function readAiFollowUpCount() {
+  const n = parseInt(process.env.INTERVIEW_AI_FOLLOWUP_COUNT, 10);
+  if (!Number.isFinite(n)) return 12;
+  return Math.min(30, Math.max(1, n));
+}
+
 function createVoiceBotRouter(pool) {
   const r = express.Router();
   const auth = voiceBotAuth();
@@ -115,7 +127,8 @@ function createVoiceBotRouter(pool) {
       const appRes = await client.query(
         `SELECT a.id, a.job_id, a.candidate_id,
                 c.name AS candidate_name,
-                j.title AS job_title, j.description AS job_description
+                j.title AS job_title, j.description AS job_description,
+                j.requirements AS job_requirements
          FROM application a
          JOIN candidate c ON c.id = a.candidate_id
          LEFT JOIN job j ON j.id = a.job_id
@@ -132,43 +145,59 @@ function createVoiceBotRouter(pool) {
         return;
       }
 
+      let companyName = "Indira IVF";
+      try {
+        const org = await client.query(
+          "SELECT company_name FROM organization_setting WHERE singleton = 1",
+        );
+        if (org.rows[0]?.company_name) {
+          companyName = org.rows[0].company_name;
+        }
+      } catch (_) {}
+
+      const vars = {
+        candidateName: row.candidate_name || "",
+        jobTitle: row.job_title || "",
+        companyName,
+      };
+
       let jiq;
       try {
         jiq = await client.query(
-          `SELECT id, question, question_type AS "questionType", display_order
+          `SELECT id, question, question_type, question_phase, display_order
            FROM job_interview_questions WHERE job_id = $1 ORDER BY display_order`,
           [row.job_id],
         );
       } catch (e) {
-        jiq = { rows: [] };
+        try {
+          jiq = await client.query(
+            `SELECT id, question, question_type, display_order
+             FROM job_interview_questions WHERE job_id = $1 ORDER BY display_order`,
+            [row.job_id],
+          );
+          jiq.rows = jiq.rows.map((q) => ({ ...q, question_phase: "role" }));
+        } catch (_e2) {
+          jiq = { rows: [] };
+        }
       }
 
-      let fallbackUsed = false;
-      let questions = jiq.rows.map((q) => ({
-        id: q.id,
-        order: q.display_order,
-        question: q.question,
-        type: q.questionType || "open_ended",
-      }));
-
-      if (questions.length === 0) {
-        fallbackUsed = true;
-        const texts = getFallbackQuestionTexts();
-        questions = texts.map((text, i) => ({
-          id: -(i + 1),
-          order: i + 1,
-          question: text,
-          type: "open_ended",
-        }));
-      }
+      const built = buildInterviewScriptFromRows(jiq.rows, vars);
 
       res.json({
         applicationId: Number(row.id),
         candidateName: row.candidate_name,
         jobTitle: row.job_title || "",
         jobDescription: row.job_description || "",
-        questions,
-        fallbackUsed,
+        jobRequirements: row.job_requirements || "",
+        companyName,
+        opening: built.opening,
+        role: built.role,
+        closing: built.closing,
+        questions: built.questions,
+        doNotRepeatTopics: built.doNotRepeatTopics,
+        fallbackUsed: built.fallbackUsed,
+        aiDifficulty: readInterviewDifficulty(),
+        aiFollowUpCount: readAiFollowUpCount(),
       });
     } catch (e) {
       console.error(e);
@@ -179,7 +208,7 @@ function createVoiceBotRouter(pool) {
   });
 
   r.post("/interview-answers", auth, async (req, res) => {
-    const { applicationId, answers } = req.body || {};
+    const { applicationId, answers, finalizeInterview } = req.body || {};
     const appId = parseInt(applicationId, 10);
     if (!Number.isFinite(appId) || !Array.isArray(answers)) {
       res.status(400).json({ error: "applicationId and answers[] required" });
@@ -247,7 +276,10 @@ function createVoiceBotRouter(pool) {
       );
       const answered = cntRes.rows[0]?.n ?? 0;
 
-      if (answered >= expected) {
+      const shouldFinalize =
+        finalizeInterview === true && answered >= expected;
+
+      if (shouldFinalize) {
         try {
           const up = await client.query(
             `UPDATE application

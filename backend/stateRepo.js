@@ -1,4 +1,5 @@
 const bcrypt = require("bcryptjs");
+const { normalizeInterviewQuestionsForSave } = require("./lib/interviewScript");
 
 function looksLikeBcrypt(s) {
   return typeof s === "string" && s.startsWith("$2") && s.length > 50;
@@ -82,12 +83,22 @@ async function loadMeta(client) {
 
 async function loadJobInterviewQuestions(client, jobIds) {
   if (!jobIds.length) return new Map();
-  const r = await client.query(
-    `SELECT id, job_id, question, question_type, display_order
-     FROM job_interview_questions WHERE job_id = ANY($1::varchar[])
-     ORDER BY job_id, display_order`,
-    [jobIds],
-  );
+  let r;
+  try {
+    r = await client.query(
+      `SELECT id, job_id, question, question_type, question_phase, display_order
+       FROM job_interview_questions WHERE job_id = ANY($1::varchar[])
+       ORDER BY job_id, display_order`,
+      [jobIds],
+    );
+  } catch (_e) {
+    r = await client.query(
+      `SELECT id, job_id, question, question_type, display_order
+       FROM job_interview_questions WHERE job_id = ANY($1::varchar[])
+       ORDER BY job_id, display_order`,
+      [jobIds],
+    );
+  }
   const m = new Map();
   for (const row of r.rows) {
     const id = row.job_id;
@@ -96,6 +107,7 @@ async function loadJobInterviewQuestions(client, jobIds) {
       id: row.id,
       question: row.question,
       questionType: row.question_type,
+      questionPhase: row.question_phase || "role",
       displayOrder: row.display_order,
     });
   }
@@ -529,22 +541,25 @@ async function saveAppState(pool, body) {
           j.requirements || "",
         ],
       );
-      const rows = (j.interviewQuestions || [])
-        .map((q, idx) => ({
-          text: String(q.question || "").trim(),
-          type: ["open_ended", "yes_no", "scale_1_5"].includes(q.questionType)
-            ? q.questionType
-            : "open_ended",
-          ord: idx + 1,
-        }))
-        .filter((q) => q.text.length >= 10 && q.text.length <= 500);
-      let ord = 1;
+      const rows = normalizeInterviewQuestionsForSave(j.interviewQuestions || []);
       for (const q of rows) {
-        await client.query(
-          `INSERT INTO job_interview_questions (job_id, question, question_type, display_order)
-           VALUES ($1,$2,$3,$4)`,
-          [j.id, q.text, q.type, ord++],
-        );
+        try {
+          await client.query(
+            `INSERT INTO job_interview_questions (job_id, question, question_type, question_phase, display_order)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [j.id, q.text, q.type, q.phase, q.ord],
+          );
+        } catch (e) {
+          if (e.code === "42703") {
+            await client.query(
+              `INSERT INTO job_interview_questions (job_id, question, question_type, display_order)
+               VALUES ($1,$2,$3,$4)`,
+              [j.id, q.text, q.type, q.ord],
+            );
+          } else {
+            throw e;
+          }
+        }
       }
     }
 
@@ -1122,6 +1137,19 @@ async function getApplicationIdForJob(pool, candidateId, jobId) {
   return r.rows[0] ? Number(r.rows[0].id) : null;
 }
 
+async function deleteJob(pool, jobId) {
+  const id = jobId == null ? "" : String(jobId).trim();
+  if (!id) return { ok: false, error: "jobId required", status: 400 };
+  const r = await pool.query(
+    "DELETE FROM job WHERE id = $1 RETURNING id",
+    [id],
+  );
+  if (r.rows.length === 0) {
+    return { ok: false, error: "Not found", status: 404 };
+  }
+  return { ok: true };
+}
+
 module.exports = {
   loadAppState,
   saveAppState,
@@ -1132,4 +1160,5 @@ module.exports = {
   getCandidateMe,
   registerCandidate,
   getApplicationIdForJob,
+  deleteJob,
 };

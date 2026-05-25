@@ -17,6 +17,7 @@ const {
   getCandidateMe,
   registerCandidate,
   getApplicationIdForJob,
+  deleteJob,
 } = require("./stateRepo");
 const { createCvAnalyserRouter } = require("./routes/cvAnalyser");
 const {
@@ -91,6 +92,26 @@ function requireCandidate(req, res, next) {
   next();
 }
 
+function bearerHrId(req) {
+  const h = req.headers.authorization;
+  const raw =
+    h && h.startsWith("Bearer ") ? h.slice(7).trim() : "";
+  if (!raw) return null;
+  const payload = verify(raw);
+  if (!payload || payload.typ !== "hr" || !payload.sub) return null;
+  return payload.sub;
+}
+
+function requireHr(req, res, next) {
+  const id = bearerHrId(req);
+  if (!id) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  req.hrId = id;
+  next();
+}
+
 app.get("/", (_req, res) => {
   res.type("text/plain").send(
     "SwarHR API — PostgreSQL + Anthropic proxy. See README.",
@@ -129,6 +150,37 @@ app.get("/api/jobs", dbReady, async (req, res) => {
     const cand = bearerCandidateId(req);
     const { meta, jobs } = await listJobsApi(pool, cand);
     res.json({ meta, jobs });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.delete("/api/jobs/:id", dbReady, requireHr, async (req, res) => {
+  try {
+    const out = await deleteJob(pool, req.params.id);
+    if (!out.ok) {
+      res.status(out.status || 400).json({ error: out.error });
+      return;
+    }
+    res.json({ ok: true, id: req.params.id });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+app.get("/api/admin/hr-users", dbReady, requireHr, async (_req, res) => {
+  try {
+    const r = await pool.query(
+      "SELECT hr_id, display_name FROM hr_user ORDER BY hr_id",
+    );
+    res.json({
+      users: r.rows.map((row) => ({
+        hrId: row.hr_id,
+        displayName: row.display_name || "",
+      })),
+    });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: String(e.message || e) });

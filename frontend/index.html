@@ -15,6 +15,97 @@
   <script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/legacy/build/pdf.min.js" crossorigin="anonymous"></script>
   <style>
     body { margin: 0; font-family: 'DM Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+
+    /* Talent Community page — 3-column layout with alternating Vision / Mission / Values
+       side panels. Form stays centered, side panels fill their full gutter width at full
+       opacity (text inside the PNGs must read crisp). Scoped to the .talent-3col wrapper. */
+    .talent-3col {
+      display: grid;
+      grid-template-columns: 1fr min(560px, 100%) 1fr;
+      gap: 24px;
+      max-width: 1500px;
+      margin: 0 auto;
+      padding: 32px 16px;
+      align-items: stretch;
+    }
+    .talent-center { min-width: 0; width: 100%; }
+    .talent-side {
+      display: flex;
+      flex-direction: column;
+      padding-top: 80px;
+      padding-bottom: 32px;
+    }
+    .talent-side--left {
+      justify-content: space-between;
+      align-items: stretch;
+    }
+    .talent-side--right {
+      justify-content: center;
+      align-items: stretch;
+    }
+    .talent-side-img {
+      width: 100%;
+      height: auto;
+      border-radius: 16px;
+      box-shadow: 0 4px 24px rgba(15, 23, 42, 0.10);
+      display: block;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 600ms ease-out, transform 600ms ease-out;
+    }
+    .talent-side-img.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    @media (max-width: 1023px) {
+      .talent-3col { grid-template-columns: 1fr min(440px, 100%) 1fr; gap: 16px; }
+      .talent-side { padding-top: 56px; }
+    }
+    @media (max-width: 767px) {
+      .talent-3col { grid-template-columns: 1fr; padding: 16px; }
+      .talent-side { display: none; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .talent-side-img { transition: none; opacity: 1; transform: none; }
+    }
+
+    /* Talent Community page — additive full-page V/M/V poster watermark.
+       Layered behind the 3-column grid via two absolute pseudo-elements: the poster
+       stretched to cover the full scrollable page height (so the whole V/M/V image is
+       reachable as the user scrolls) plus a white wash to keep content readable.
+       Pointer events disabled so the form/buttons/side panels remain interactive. */
+    .talent-watermark {
+      position: relative;
+      min-height: 100vh;
+      isolation: isolate;
+    }
+    .talent-watermark::before,
+    .talent-watermark::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .talent-watermark::before {
+      background-image: url('/Background.jpg');
+      background-size: 100% 100%;
+      background-position: top center;
+      background-repeat: no-repeat;
+      opacity: 0.18;
+    }
+    .talent-watermark::after {
+      background-color: rgba(255, 255, 255, 0.65);
+    }
+    .talent-watermark > * {
+      position: relative;
+      z-index: 1;
+    }
+    @media (max-width: 768px) {
+      .talent-watermark::before {
+        opacity: 0.14;
+      }
+    }
   </style>
 </head>
 <body>
@@ -41,7 +132,7 @@
   </script>
 
   <script type="text/babel" data-presets="react">
-    const { useState, useEffect, useRef, useCallback } = React;
+    const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
     /** Base URL for candidate-facing absolute links (invite emails). Uses VITE_PUBLIC_APP_URL when set, else window.location.origin. */
     function publicAppOrigin() {
@@ -704,7 +795,6 @@
               <div className="bg-indigo-700 px-6 py-5">
                 <div className="flex items-center gap-2 mb-2"><div className="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center font-black text-white text-sm">S</div><Badge/></div>
                 <h1 className="text-xl font-black text-white">Consent & Privacy Notice</h1>
-                <p className="text-indigo-200 text-xs mt-1">§5 & §6, DPDPA 2023</p>
               </div>
               <div className="p-6 space-y-3">
                 <p className="text-slate-300 text-sm">Data we will process for your recruitment:</p>
@@ -724,7 +814,7 @@
                 </div>
                 <label className={`flex gap-3 p-4 rounded-xl border cursor-pointer transition-all mt-4 ${agreed ? "border-indigo-500 bg-indigo-900/30" : "border-slate-700 bg-slate-800/50"}`}>
                   <input type="checkbox" checked={agreed} onChange={() => setAgreed(!agreed)} className="mt-0.5 w-5 h-5 accent-indigo-500 shrink-0"/>
-                  <div><p className="text-white text-sm font-bold">I consent to all of the above</p><p className="text-slate-400 text-xs mt-0.5">I agree to processing of my data and confirm I am 18+ (§9 DPDPA).</p></div>
+                  <div><p className="text-white text-sm font-bold">I consent to all of the above</p><p className="text-slate-400 text-xs mt-0.5">I agree to processing of my data and confirm I am 18+</p></div>
                 </label>
                 <p className="text-slate-500 text-xs">By proceeding you confirm you have read our <button onClick={() => setShowPolicy(true)} className="text-indigo-400 underline">Privacy Policy</button>.</p>
                 <div className="flex gap-3 pt-1">
@@ -795,7 +885,7 @@
                   {role === "hr" && (
                     <div>
                       <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Password</label>
-                      <input type="password" value={hrPw} onChange={e => { setHrPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="HR password (see README)" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/>
+                      <input type="password" value={hrPw} onChange={e => { setHrPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="HR Password" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/>
                     </div>
                   )}
                   {err && <p className="text-red-400 text-sm">⚠ {err}</p>}
@@ -965,7 +1055,7 @@
                   </div>
                   <div className="flex gap-2 pt-3 border-t border-slate-100" onClick={e => e.stopPropagation()}>
                     <button onClick={() => onView(c.id)} className="flex-1 py-2 bg-slate-900 text-white text-xs font-bold rounded-lg">View</button>
-                    {c.consent && !activeRoleHasTranscript(c) && (c.status === "SHORTLISTED" || c.status === "APPLIED") && (
+                    {c.consent && !activeRoleHasTranscript(c) && (c.status === "SHORTLISTED" || c.status === "APPLIED") && !schedFor(c) && (
                       <button onClick={() => onInterview(c.id)} className="flex-1 py-2 bg-indigo-600 text-white text-xs font-bold rounded-lg">Start interview</button>
                     )}
                     {(c.status === "INTERVIEWED" || c.analysis || candidateHasAnyInterviewTranscript(c) || (c.applicationHistory || []).some((a) => a.analysis || a.interviewCompletedAt)) && (
@@ -1187,7 +1277,7 @@
               <textarea rows={2} value={remarks} onChange={(e) => setRemarks(e.target.value)} placeholder="Remarks for this application…" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm resize-none mb-4"/>
               <div className="grid grid-cols-2 gap-2">
                 {candidate.consent && portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) === "APPLIED" && <button type="button" onClick={() => setStatus("SHORTLISTED")} className="py-2.5 bg-blue-600 text-white font-bold rounded-xl text-sm">✓ Shortlist</button>}
-                {candidate.consent && selectedAppRow?.jobId && !transcriptAvailableForJob(candidate, selectedAppRow.jobId) && (portalStatusLabel(candidate, selectedAppRow.jobId) === "SHORTLISTED" || portalStatusLabel(candidate, selectedAppRow.jobId) === "APPLIED") && <button type="button" onClick={() => typeof onInterview === "function" && onInterview(selectedAppRow.jobId)} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
+                {candidate.consent && selectedAppRow?.jobId && !transcriptAvailableForJob(candidate, selectedAppRow.jobId) && !selectedAppRow.interviewScheduledAt && (portalStatusLabel(candidate, selectedAppRow.jobId) === "SHORTLISTED" || portalStatusLabel(candidate, selectedAppRow.jobId) === "APPLIED") && <button type="button" onClick={() => typeof onInterview === "function" && onInterview(selectedAppRow.jobId)} className="py-2.5 bg-indigo-600 text-white font-bold rounded-xl text-sm">🎤 Start interview</button>}
                 {(portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) === "INTERVIEWED" || analysisForSelected) && (
                   <button type="button" onClick={() => typeof onAnalysis === "function" && onAnalysis(selectedApplicationId)} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>
                 )}
@@ -1200,25 +1290,87 @@
       );
     }
 
+    const MANDATORY_OPENING_DEFAULTS = [
+      "Hello {{candidateName}}, welcome. Please introduce yourself and confirm your full name for our records.",
+      "Tell me about yourself — your background, experience, and what brings you to this opportunity.",
+      "What motivated you to apply for the {{jobTitle}} role at {{companyName}}?",
+      "What are your key strengths that make you a good fit for this position?",
+    ];
+    const MANDATORY_CLOSING_DEFAULTS = [
+      "Thank you for completing this interview. We have recorded your responses and our team will review them and get back to you soon. Have a great day.",
+    ];
+
     function JobMaster({ jobs, onSave, onBack }) {
-      const MAX_Q = 20;
-      const defaultRows = () => Array.from({ length: 5 }, () => ({ question: "", questionType: "open_ended" }));
+      const MAX_ROLE_Q = 20;
+      const MAX_OPEN_Q = 10;
+      const MAX_CLOSE_Q = 5;
+      const phaseCap = (phase) => {
+        if (phase === "mandatory_open") return MAX_OPEN_Q;
+        if (phase === "mandatory_close") return MAX_CLOSE_Q;
+        return MAX_ROLE_Q;
+      };
+      const phaseLabel = (phase) => {
+        if (phase === "mandatory_open") return "opening";
+        if (phase === "mandatory_close") return "closing";
+        return "role";
+      };
+      const defaultNewQuestionRows = () => [
+        ...MANDATORY_OPENING_DEFAULTS.map((question) => ({ question, questionType: "open_ended", questionPhase: "mandatory_open" })),
+        ...Array.from({ length: 5 }, () => ({ question: "", questionType: "open_ended", questionPhase: "role" })),
+        ...MANDATORY_CLOSING_DEFAULTS.map((question) => ({ question, questionType: "open_ended", questionPhase: "mandatory_close" })),
+      ];
       const [local, setLocal] = useState(jobs);
       const [edit, setEdit] = useState(null);
       const [form, setForm] = useState({ title: "", designation: "", location: "", description: "", requirements: "" });
-      const [questionRows, setQuestionRows] = useState(defaultRows);
+      const [questionRows, setQuestionRows] = useState(defaultNewQuestionRows);
       const [qErrors, setQErrors] = useState({});
       const [saved, setSaved] = useState(false);
       const [toast, setToast] = useState("");
+      const [removingId, setRemovingId] = useState(null);
       const normalizeRowsFromJob = (j) => {
+        const phaseOrder = { mandatory_open: 0, role: 1, mandatory_close: 2 };
         const iq = (j.interviewQuestions || []).slice().sort((a, b) => (a.displayOrder || 0) - (b.displayOrder || 0));
-        const mapped = iq.map((q) => ({
-          question: q.question || "",
-          questionType: ["open_ended", "yes_no", "scale_1_5"].includes(q.questionType) ? q.questionType : "open_ended",
-          id: q.id,
-        }));
-        if (mapped.length === 0) return defaultRows();
-        return [...mapped, { question: "", questionType: "open_ended" }].slice(0, MAX_Q);
+        const mapped = iq
+          .map((q) => ({
+            question: q.question || "",
+            questionType: ["open_ended", "yes_no", "scale_1_5"].includes(q.questionType) ? q.questionType : "open_ended",
+            questionPhase: ["mandatory_open", "role", "mandatory_close"].includes(q.questionPhase) ? q.questionPhase : "role",
+            id: q.id,
+          }))
+          .sort((a, b) => (phaseOrder[a.questionPhase] ?? 1) - (phaseOrder[b.questionPhase] ?? 1));
+        if (mapped.length === 0) return defaultNewQuestionRows();
+        const hasEmptyRole = mapped.some((r) => r.questionPhase === "role" && !r.question.trim());
+        if (!hasEmptyRole) return [...mapped, { question: "", questionType: "open_ended", questionPhase: "role" }];
+        return mapped;
+      };
+      const removeJob = async (job) => {
+        if (!job || !job.id) return;
+        const label = job.title || "this job";
+        if (!window.confirm(`Remove "${label}"? This will hide it from the careers page for candidates immediately.`)) return;
+        setRemovingId(job.id);
+        try {
+          const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}`, {
+            method: "DELETE",
+            headers: { ...authHeaders() },
+          });
+          if (!res.ok && res.status !== 404) {
+            const data = await res.json().catch(() => ({}));
+            setToast(data.error || `Could not remove job (${res.status}).`);
+            setTimeout(() => setToast(""), 4000);
+            return;
+          }
+          const next = local.filter((x) => x.id !== job.id);
+          setLocal(next);
+          onSave(next);
+          if (edit === job.id) setEdit(null);
+          setToast(`Removed "${label}".`);
+          setTimeout(() => setToast(""), 4000);
+        } catch (_e) {
+          setToast("Network error — could not remove job.");
+          setTimeout(() => setToast(""), 4000);
+        } finally {
+          setRemovingId(null);
+        }
       };
       const saveJob = () => {
         if (!form.title.trim()) return;
@@ -1231,19 +1383,37 @@
           filled.push({
             question: t,
             questionType: ["open_ended", "yes_no", "scale_1_5"].includes(row.questionType) ? row.questionType : "open_ended",
+            questionPhase: ["mandatory_open", "role", "mandatory_close"].includes(row.questionPhase) ? row.questionPhase : "role",
           });
         });
         setQErrors(errs);
         if (Object.keys(errs).length) return;
+        const roleN = filled.filter((q) => q.questionPhase === "role").length;
+        const openN = filled.filter((q) => q.questionPhase === "mandatory_open").length;
+        const closeN = filled.filter((q) => q.questionPhase === "mandatory_close").length;
+        if (roleN > MAX_ROLE_Q) {
+          setToast(`Maximum ${MAX_ROLE_Q} role-specific questions.`);
+          setTimeout(() => setToast(""), 4000);
+          return;
+        }
+        if (openN > MAX_OPEN_Q) {
+          setToast(`Maximum ${MAX_OPEN_Q} mandatory opening questions.`);
+          setTimeout(() => setToast(""), 4000);
+          return;
+        }
+        if (closeN > MAX_CLOSE_Q) {
+          setToast(`Maximum ${MAX_CLOSE_Q} mandatory closing questions.`);
+          setTimeout(() => setToast(""), 4000);
+          return;
+        }
         const interviewQuestions = filled.map((q, idx) => ({ ...q, displayOrder: idx + 1 }));
         const payload = { ...form, interviewQuestions };
-        const n = interviewQuestions.length;
         if (edit === "new") {
           setLocal((p) => [...p, { ...payload, id: "j-" + Date.now() }]);
         } else {
           setLocal((p) => p.map((j) => (j.id === edit ? { ...j, ...payload } : j)));
         }
-        setToast(`Job saved with ${n} interview question${n === 1 ? "" : "s"}.`);
+        setToast(`Saved: ${openN} opening · ${roleN} role · ${closeN} closing.`);
         setSaved(true);
         setTimeout(() => setSaved(false), 2500);
         setTimeout(() => setToast(""), 4000);
@@ -1259,7 +1429,81 @@
           return next;
         });
       };
-      const nonEmptyCount = questionRows.filter((r) => r.question.trim()).length;
+      const addRow = (phase) => {
+        const cap = phaseCap(phase);
+        const filled = questionRows.filter((r) => r.questionPhase === phase && r.question.trim()).length;
+        if (filled >= cap) return;
+        setQuestionRows((rows) => {
+          const next = [...rows];
+          let insertAt;
+          if (phase === "mandatory_open") {
+            const firstRole = next.findIndex((r) => r.questionPhase === "role");
+            const firstClose = next.findIndex((r) => r.questionPhase === "mandatory_close");
+            if (firstRole >= 0) insertAt = firstRole;
+            else if (firstClose >= 0) insertAt = firstClose;
+            else insertAt = next.length;
+          } else if (phase === "mandatory_close") {
+            insertAt = next.length;
+          } else {
+            const closeIdx = next.findIndex((r) => r.questionPhase === "mandatory_close");
+            insertAt = closeIdx >= 0 ? closeIdx : next.length;
+          }
+          next.splice(insertAt, 0, { question: "", questionType: "open_ended", questionPhase: phase });
+          return next;
+        });
+      };
+      const countJobQuestions = (j) => {
+        const iq = j.interviewQuestions || [];
+        const ok = (q) => q.question && String(q.question).trim().length >= 10;
+        const open = iq.filter((q) => q.questionPhase === "mandatory_open" && ok(q)).length;
+        const role = iq.filter((q) => (q.questionPhase === "role" || !q.questionPhase) && ok(q)).length;
+        const close = iq.filter((q) => q.questionPhase === "mandatory_close" && ok(q)).length;
+        return { open, role, close };
+      };
+      const renderQuestionSection = (phaseFilter, sectionTitle, hint, allowRemove) => {
+        const indices = questionRows.map((r, i) => ({ r, i })).filter(({ r }) => r.questionPhase === phaseFilter);
+        const filledForPhase = indices.filter(({ r }) => r.question.trim()).length;
+        const capForPhase = phaseCap(phaseFilter);
+        const labelForPhase = phaseLabel(phaseFilter);
+        return (
+          <div key={phaseFilter} className="mb-6">
+            <div className="flex items-center gap-2 mb-2">
+              <h4 className="text-xs font-black text-slate-700 uppercase tracking-wide">{sectionTitle}</h4>
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800">{phaseFilter === "role" ? "HR script" : "Mandatory"}</span>
+            </div>
+            {hint ? <p className="text-xs text-slate-500 mb-3">{hint}</p> : null}
+            <div className="space-y-2">
+              {indices.map(({ r: row, i }, localIdx) => (
+                <div key={i} className={`flex flex-wrap items-start gap-2 ${qErrors[i] ? "rounded-xl ring-2 ring-red-300 bg-red-50/50 p-2 -mx-2" : ""}`}>
+                  <div className="flex flex-col gap-0.5 pt-2 shrink-0">
+                    <button type="button" disabled={localIdx === 0} onClick={() => moveRow(i, indices[localIdx - 1].i)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move up">↑</button>
+                    <button type="button" disabled={localIdx >= indices.length - 1} onClick={() => moveRow(i, indices[localIdx + 1].i)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move down">↓</button>
+                  </div>
+                  <span className="text-xs font-bold text-slate-500 pt-3 w-8 shrink-0">Q{localIdx + 1}</span>
+                  <input value={row.question} placeholder={phaseFilter === "role" ? "e.g. Walk me through your most recent IVF lab experience" : "Interview question"} onChange={(e) => { const v = e.target.value; setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, question: v } : r)); setQErrors((e0) => { const n = { ...e0 }; delete n[i]; return n; }); }} className="flex-1 min-w-[200px] px-3 py-2 border border-slate-300 rounded-lg text-sm bg-slate-800 text-white placeholder:text-slate-500"/>
+                  <select value={row.questionType} onChange={(e) => setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, questionType: e.target.value } : r))} className="px-2 py-2 border border-slate-300 rounded-lg text-xs bg-slate-800 text-white shrink-0">
+                    <option value="open_ended">Open-ended</option>
+                    <option value="yes_no">Yes / No</option>
+                    <option value="scale_1_5">Scale 1–5</option>
+                  </select>
+                  {allowRemove ? (
+                    <button type="button" disabled={indices.length <= 1} onClick={() => setQuestionRows((rows) => rows.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-500 disabled:opacity-30 text-lg px-1 shrink-0" aria-label="Remove">✕</button>
+                  ) : null}
+                  {qErrors[i] ? <p className="w-full text-xs text-red-600 font-semibold pl-20">{qErrors[i]}</p> : null}
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center justify-between mt-3 flex-wrap gap-2">
+              {filledForPhase < capForPhase ? (
+                <button type="button" onClick={() => addRow(phaseFilter)} className="text-sm font-bold text-indigo-600 hover:text-indigo-800">+ Add {labelForPhase} question</button>
+              ) : (
+                <span className="text-xs text-amber-700 font-semibold">Maximum {capForPhase} {labelForPhase} questions.</span>
+              )}
+              <span className="text-xs text-slate-500">{labelForPhase.charAt(0).toUpperCase() + labelForPhase.slice(1)} questions: {filledForPhase} / {capForPhase}</span>
+            </div>
+          </div>
+        );
+      };
       return (
         <div className="min-h-screen bg-slate-50">
           <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
@@ -1268,46 +1512,21 @@
           </div>
           {toast ? <div className="bg-teal-600 text-white text-center text-sm py-2 font-semibold">{toast}</div> : null}
           <div className="max-w-4xl mx-auto px-6 py-8">
-            <div className="flex items-center justify-between mb-6"><h1 className="text-2xl font-black text-slate-900">Job Postings</h1><button type="button" onClick={() => { setForm({ title: "", designation: "", location: "", description: "", requirements: "" }); setQuestionRows(defaultRows()); setQErrors({}); setEdit("new"); }} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">+ New</button></div>
+            <div className="flex items-center justify-between mb-6"><h1 className="text-2xl font-black text-slate-900">Job Postings</h1><button type="button" onClick={() => { setForm({ title: "", designation: "", location: "", description: "", requirements: "" }); setQuestionRows(defaultNewQuestionRows()); setQErrors({}); setEdit("new"); }} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl">+ New</button></div>
             {edit && (
               <div className="bg-white rounded-2xl border border-indigo-200 shadow-lg p-6 mb-6">
                 <div className="grid grid-cols-2 gap-4 mb-4">{[["title", "Title"], ["designation", "Designation"], ["location", "Location"]].map(([k, l]) => <div key={k}><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><input value={form[k]} onChange={(e) => setForm((p) => ({ ...p, [k]: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-white"/></div>)}</div>
                 {[["description", "Description"], ["requirements", "Requirements"]].map(([k, l]) => <div key={k} className="mb-4"><label className="text-xs font-bold text-slate-500 mb-1 block">{l}</label><textarea value={form[k]} onChange={(e) => setForm((p) => ({ ...p, [k]: e.target.value }))} rows={3} className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm resize-none bg-white"/></div>)}
                 <div className="border-t border-slate-200 pt-5 mt-2 mb-4">
                   <h3 className="text-sm font-black text-slate-800 uppercase tracking-wide mb-1">Interview Questions</h3>
-                  <p className="text-xs text-slate-500 mb-4">These questions will be asked by the AI Voice Bot during candidate screening for this position.</p>
-                  <div className="space-y-2">
-                    {questionRows.map((row, i) => (
-                      <div key={i} className={`flex flex-wrap items-start gap-2 ${qErrors[i] ? "rounded-xl ring-2 ring-red-300 bg-red-50/50 p-2 -mx-2" : ""}`}>
-                        <div className="flex flex-col gap-0.5 pt-2 shrink-0">
-                          <button type="button" disabled={i === 0} onClick={() => moveRow(i, i - 1)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move up">↑</button>
-                          <button type="button" disabled={i >= questionRows.length - 1} onClick={() => moveRow(i, i + 1)} className="text-slate-400 hover:text-slate-700 disabled:opacity-30 text-xs leading-none" aria-label="Move down">↓</button>
-                        </div>
-                        <span className="text-xs font-bold text-slate-500 pt-3 w-8 shrink-0">Q{i + 1}</span>
-                        <input value={row.question} placeholder="e.g. Walk me through your most recent IVF lab experience" onChange={(e) => { const v = e.target.value; setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, question: v } : r)); setQErrors((e0) => { const n = { ...e0 }; delete n[i]; return n; }); }} className="flex-1 min-w-[200px] px-3 py-2 border border-slate-300 rounded-lg text-sm bg-slate-800 text-white placeholder:text-slate-500"/>
-                        <select value={row.questionType} onChange={(e) => setQuestionRows((rows) => rows.map((r, j) => j === i ? { ...r, questionType: e.target.value } : r))} className="px-2 py-2 border border-slate-300 rounded-lg text-xs bg-slate-800 text-white shrink-0">
-                          <option value="open_ended">Open-ended</option>
-                          <option value="yes_no">Yes / No</option>
-                          <option value="scale_1_5">Scale 1–5</option>
-                        </select>
-                        <button type="button" disabled={questionRows.length <= 1} onClick={() => questionRows.length > 1 && setQuestionRows((rows) => rows.filter((_, j) => j !== i))} className="text-slate-400 hover:text-red-500 disabled:opacity-30 text-lg px-1 shrink-0" aria-label="Remove">✕</button>
-                        {qErrors[i] ? <p className="w-full text-xs text-red-600 font-semibold pl-20">{qErrors[i]}</p> : null}
-                      </div>
-                    ))}
-                  </div>
-                  <div className="flex items-center justify-between mt-4 flex-wrap gap-2">
-                    {questionRows.length < MAX_Q ? (
-                      <button type="button" onClick={() => setQuestionRows((rows) => [...rows, { question: "", questionType: "open_ended" }])} className="text-sm font-bold text-indigo-600 hover:text-indigo-800">+ Add Question</button>
-                    ) : (
-                      <span className="text-xs text-amber-700 font-semibold">Maximum 20 questions reached.</span>
-                    )}
-                    <span className="text-xs text-slate-500">Total: {nonEmptyCount} / {MAX_Q} max</span>
-                  </div>
+                  {renderQuestionSection("mandatory_open", "Mandatory opening", "Asked first. Placeholders: {{candidateName}}, {{jobTitle}}, {{companyName}}.", true)}
+                  {renderQuestionSection("role", "Role-specific (HR script)", "Asked after opening, before AI follow-ups.", true)}
+                  {renderQuestionSection("mandatory_close", "Mandatory closing", "Asked last after AI follow-ups.", true)}
                 </div>
                 <div className="flex gap-3"><button type="button" onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg">Save</button><button type="button" onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
               </div>
             )}
-            <div className="space-y-4">{local.map((j) => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p>{(j.interviewQuestions || []).length > 0 ? <p className="text-xs text-teal-700 font-semibold mt-1">{(j.interviewQuestions || []).filter((q) => q.question && String(q.question).trim().length >= 10).length} interview questions</p> : null}</div><div className="flex gap-2 ml-4 shrink-0"><button type="button" onClick={() => { setForm({ title: j.title, designation: j.designation || "", location: j.location || "", description: j.description || "", requirements: j.requirements || "" }); setQuestionRows(normalizeRowsFromJob(j)); setQErrors({}); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button type="button" onClick={() => setLocal((p) => p.filter((x) => x.id !== j.id))} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg">Remove</button></div></div>)}</div>
+            <div className="space-y-4">{local.map((j) => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p>{(() => { const c = countJobQuestions(j); return c.open + c.role + c.close > 0 ? <p className="text-xs text-teal-700 font-semibold mt-1">{c.open} opening · {c.role} role · {c.close} closing</p> : null; })()}</div><div className="flex gap-2 ml-4 shrink-0"><button type="button" onClick={() => { setForm({ title: j.title, designation: j.designation || "", location: j.location || "", description: j.description || "", requirements: j.requirements || "" }); setQuestionRows(normalizeRowsFromJob(j)); setQErrors({}); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button type="button" disabled={removingId === j.id} onClick={() => removeJob(j)} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">{removingId === j.id ? "Removing…" : "Remove"}</button></div></div>)}</div>
           </div>
         </div>
       );
@@ -1451,7 +1670,7 @@
           <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
             <div className="flex items-center gap-3">
               {showBack ? <button type="button" onClick={onBack} className="text-slate-400 hover:text-white">←</button> : null}
-              <span className="font-bold">Job Board</span>
+              <span className="font-bold">Your Next Career Move Starts Here</span>
             </div>
             <div className="flex items-center gap-2 md:gap-3 flex-wrap justify-end">
               {authStripReady && authCandidate && onTalentPoolPortal ? (
@@ -1463,7 +1682,7 @@
             </div>
           </div>
           <div className="max-w-4xl mx-auto px-6 py-8">
-            <h1 className="text-3xl font-black text-slate-900 mb-2">Open Positions</h1>
+            <h1 className="text-3xl font-black text-slate-900 mb-2">We’re Hiring🚀</h1>
             <p className="text-slate-500 mb-5">Indira IVF — India's Leading Fertility Healthcare Chain</p>
             <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search jobs…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-4 shadow-sm focus:outline-none focus:border-indigo-400"/>
             {onTalentPool ? (
@@ -1570,7 +1789,7 @@
               </div>
               <input ref={ref} type="file" accept=".jpg,.jpeg,.pdf,.doc,.docx" onChange={e => handleFile(e.target.files?.[0])} className="hidden"/>
               {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-sm mb-4 flex gap-2"><span>⚠</span><span>{error}</span></div>}
-              <label className={`flex gap-3 p-3 rounded-xl border mb-4 cursor-pointer ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I acknowledge processing for recruitment per §6 DPDPA.</p></label>
+              <label className={`flex gap-3 p-3 rounded-xl border mb-4 cursor-pointer ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I acknowledge processing for recruitment.</p></label>
               <button onClick={() => onComplete(file)} disabled={!file || !ack || processing} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">Submit →</button>
             </div>
           </div>
@@ -1616,6 +1835,28 @@
           })
           .catch(() => {});
       }, []);
+      useEffect(() => {
+        if (done) return;
+        if (typeof IntersectionObserver === "undefined") {
+          document.querySelectorAll(".talent-side-img").forEach((el) => el.classList.add("is-visible"));
+          return;
+        }
+        const imgs = document.querySelectorAll(".talent-side-img");
+        if (!imgs.length) return;
+        const obs = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((e) => {
+              if (e.isIntersecting) {
+                e.target.classList.add("is-visible");
+                obs.unobserve(e.target);
+              }
+            });
+          },
+          { threshold: 0.15 }
+        );
+        imgs.forEach((el) => obs.observe(el));
+        return () => obs.disconnect();
+      }, [done]);
       const handleFile = async (f) => { if (!f) return; setError(""); setProcessing(true); try { setFile(await processResumeFile(f, mb)); } catch (e) { setError(e.message); setFile(null); } finally { setProcessing(false); } };
       const resolvedLocation = () => {
         const c = form.locationCity;
@@ -1673,12 +1914,16 @@
         </div>
       );
       return (
-        <div className="min-h-screen bg-slate-50">
+        <div className="talent-watermark min-h-screen bg-slate-50">
           <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">←</button><span className="font-bold">Join Talent Pool</span><Badge/></div>
-          <div className="max-w-2xl mx-auto px-6 py-8">
-            <h1 className="text-3xl font-black text-slate-900 mb-1">Submit to Talent Pool</h1>
-            <p className="text-slate-500 mb-5">No active role matches? Share your profile.</p>
-            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-4 mb-5 text-xs text-indigo-700"><p className="font-bold mb-1">📋 About the Talent Pool</p><p>Your CV is stored independently. HR SPOCs will contact you. All access is logged (§5, §6, §8 DPDPA).</p></div>
+          <div className="talent-3col">
+            <aside className="talent-side talent-side--left" aria-hidden="true">
+              <img src="/Vision.png" alt="" className="talent-side-img" loading="eager"/>
+              <img src="/Values.png" alt="" className="talent-side-img" loading="lazy"/>
+            </aside>
+            <main className="talent-center">
+              <h1 className="text-3xl font-black text-slate-900 mb-1">Join Our Talent Community</h1>
+              <p className="text-slate-500 mb-5">Share your profile and we’ll reach out when the right opportunity comes up.</p>
             {formErr ? <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-200 rounded-xl px-4 py-2">{formErr}</div> : null}
             <div className="bg-white rounded-2xl border border-slate-200 p-6 space-y-4">
               {[["Full Name *", "name", "text"], ["Email *", "email", "email"], ["Phone", "phone", "tel"]].map(([l, k, t]) => <div key={k}><label className="block text-xs font-bold text-slate-500 uppercase mb-1">{l}</label><input type={t} value={form[k]} onChange={e => setForm(p => ({ ...p, [k]: e.target.value }))} className="w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:border-indigo-400"/></div>)}
@@ -1752,6 +1997,10 @@
               <label className={`flex gap-3 p-3 rounded-xl border cursor-pointer ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I consent to my profile being stored in the talent pool (§6 DPDPA).</p></label>
               <button onClick={submit} disabled={!form.name.trim() || !form.email.trim() || !file || !ack} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">Submit →</button>
             </div>
+            </main>
+            <aside className="talent-side talent-side--right" aria-hidden="true">
+              <img src="/Mission.png" alt="" className="talent-side-img" loading="lazy"/>
+            </aside>
           </div>
         </div>
       );
@@ -2001,26 +2250,180 @@
       );
     }
 
-    function AuditLogView({ auditLog, onBack }) {
+    const AUDIT_ACTION_META = {
+      "interview.reattempt_approved":   { label: "Reattempt approved",    tone: "green" },
+      "interview.reattempt_rejected":   { label: "Reattempt rejected",    tone: "red" },
+      "interview.reattempt_requested":  { label: "Reattempt requested",   tone: "amber" },
+      "interview.incomplete_technical": { label: "Interview ended early", tone: "orange" },
+      VIEW_TP_PROFILE:                  { label: "Viewed talent profile", tone: "blue" },
+      VIEW_TP_CV:                       { label: "Viewed CV",             tone: "blue" },
+      DOWNLOAD_TP_CV:                   { label: "Downloaded CV",         tone: "purple" },
+      MAP_TO_JOB:                       { label: "Mapped to job",         tone: "green" },
+    };
+
+    const AUDIT_TONE_CLASSES = {
+      green:  "bg-green-50 text-green-700",
+      red:    "bg-red-50 text-red-700",
+      amber:  "bg-amber-50 text-amber-700",
+      orange: "bg-orange-50 text-orange-700",
+      blue:   "bg-blue-50 text-blue-700",
+      purple: "bg-purple-50 text-purple-700",
+      slate:  "bg-slate-100 text-slate-700",
+    };
+
+    function parseAuditDetails(d) {
+      if (d == null) return null;
+      if (typeof d === "object") return d;
+      const s = String(d).trim();
+      if (!s || !(s.startsWith("{") || s.startsWith("["))) return null;
+      try { return JSON.parse(s); } catch { return null; }
+    }
+
+    function humanizeClientDetail(s) {
+      if (!s) return "";
+      return String(s).replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
+    function resolveActorLabel(actor, hrUsersMap, candidatesMap) {
+      if (!actor) return "—";
+      if (actor === "HR") return "HR";
+      const hrName = hrUsersMap && hrUsersMap[actor];
+      if (hrName && String(hrName).trim()) return `${String(hrName).trim()} (${actor})`;
+      const candName = candidatesMap && candidatesMap[actor];
+      if (candName && String(candName).trim()) return `${String(candName).trim()} (${actor})`;
+      return actor;
+    }
+
+    function formatAuditDate(ts) {
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return "";
+      return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    }
+
+    function formatAuditTime(ts) {
+      const d = new Date(ts);
+      if (Number.isNaN(d.getTime())) return "";
+      return d
+        .toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })
+        .replace(/\s*(am|pm)/i, (_, p) => " " + p.toUpperCase());
+    }
+
+    function humanizeAuditEntry(entry, hrUsersMap, candidatesMap) {
+      const meta = AUDIT_ACTION_META[entry.action] || { label: entry.action, tone: "slate" };
+      const parsed = parseAuditDetails(entry.details);
+
+      if (!parsed) {
+        return {
+          label: meta.label,
+          tone: meta.tone,
+          sentence: typeof entry.details === "string" ? entry.details : "",
+        };
+      }
+
+      const app = parsed.applicationId != null ? `Application #${parsed.applicationId}` : "this application";
+      const candidateLabel = parsed.candidateId
+        ? resolveActorLabel(parsed.candidateId, hrUsersMap, candidatesMap)
+        : null;
+
+      const candidateReasonLabel = (() => {
+        const code = parsed.candidateReasonCode;
+        if (!code) return null;
+        const found = CANDIDATE_REATTEMPT_REASONS.find((r) => r.value === code);
+        return found ? found.label : code;
+      })();
+
+      const hrReasonLabel = parsed.hrReasonCode
+        ? HR_REATTEMPT_REASON_LABELS[parsed.hrReasonCode] || parsed.hrReasonCode
+        : null;
+
+      switch (entry.action) {
+        case "interview.reattempt_approved": {
+          const who = candidateLabel || "candidate —";
+          const reason = hrReasonLabel || "—";
+          const notes = parsed.hasNotes ? " HR notes attached." : "";
+          return { ...meta, sentence: `Approved reattempt for ${who} on ${app}. Reason: ${reason}.${notes}` };
+        }
+        case "interview.reattempt_rejected": {
+          const who = candidateLabel || "candidate —";
+          const reason = hrReasonLabel || "—";
+          const notes = parsed.hasNotes ? " HR notes attached." : "";
+          return { ...meta, sentence: `Rejected reattempt for ${who} on ${app}. Reason: ${reason}.${notes}` };
+        }
+        case "interview.reattempt_requested": {
+          const reason = candidateReasonLabel || "—";
+          const note = parsed.hasText ? " Candidate added a written note." : "";
+          return { ...meta, sentence: `Candidate requested an interview reattempt for ${app}. Reason: ${reason}.${note}` };
+        }
+        case "interview.incomplete_technical": {
+          const lab = parsed.label ? parsed.label : "Technical failure";
+          const detail = parsed.clientDetail ? ` — ${humanizeClientDetail(parsed.clientDetail)}` : "";
+          return { ...meta, sentence: `Interview for ${app} ended early (${lab})${detail}.` };
+        }
+        default: {
+          const parts = Object.entries(parsed)
+            .filter(([k]) => k !== "applicationId")
+            .map(([k, v]) => `${k}: ${typeof v === "boolean" ? (v ? "yes" : "no") : v}`);
+          return {
+            ...meta,
+            sentence: parts.length ? `${app} — ${parts.join(" · ")}` : `${app}.`,
+          };
+        }
+      }
+    }
+
+    function AuditLogView({ auditLog, candidates, hrUsers, onRefresh, onBack }) {
       const [filter, setFilter] = useState("");
-      const filtered = filter ? auditLog.filter(a => `${a.action} ${a.actor} ${a.details}`.toLowerCase().includes(filter.toLowerCase())) : auditLog;
-      const sorted = [...filtered].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
-      const color = (a) => a.startsWith("VIEW") ? "bg-blue-50 text-blue-700" : a.startsWith("DOWNLOAD") ? "bg-purple-50 text-purple-700" : a.startsWith("MAP") ? "bg-green-50 text-green-700" : "bg-slate-100 text-slate-700";
+      const candidatesMap = useMemo(
+        () => Object.fromEntries((candidates || []).map((c) => [c.id, c.name])),
+        [candidates],
+      );
+      const hrUsersMap = hrUsers || {};
+      const rows = useMemo(
+        () =>
+          (auditLog || []).map((a) => ({
+            entry: a,
+            humanized: humanizeAuditEntry(a, hrUsersMap, candidatesMap),
+            actorLabel: resolveActorLabel(a.actor, hrUsersMap, candidatesMap),
+            dateLabel: formatAuditDate(a.timestamp),
+            timeLabel: formatAuditTime(a.timestamp),
+          })),
+        [auditLog, hrUsersMap, candidatesMap],
+      );
+      const q = filter.trim().toLowerCase();
+      const filtered = q
+        ? rows.filter((r) =>
+            `${r.humanized.label} ${r.actorLabel} ${r.entry.action} ${r.humanized.sentence} ${r.dateLabel} ${r.timeLabel}`
+              .toLowerCase()
+              .includes(q),
+          )
+        : rows;
+      const sorted = [...filtered].sort((a, b) => new Date(b.entry.timestamp) - new Date(a.entry.timestamp));
       return (
         <div className="min-h-screen bg-slate-50">
-          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Audit Log</span><span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{auditLog.length}</span></div>
+          <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3">
+            <button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button>
+            <span className="font-bold">Audit Log</span>
+            <span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{auditLog.length}</span>
+            {onRefresh ? <button type="button" onClick={onRefresh} className="ml-auto text-xs text-slate-300 hover:text-white border border-slate-700 rounded-lg px-3 py-1">↻ Refresh names</button> : null}
+          </div>
           <div className="max-w-4xl mx-auto px-6 py-8">
             <h1 className="text-3xl font-black text-slate-900 mb-1">Access & Action Audit</h1>
-            <p className="text-slate-500 mb-5">All HR access logged per §8 DPDPA.</p>
-            <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-5 shadow-sm"/>
+            <input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Filter by name, action, application, date…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-5 shadow-sm"/>
             {sorted.length === 0 ? <div className="bg-white rounded-2xl border-2 border-dashed border-slate-200 py-16 text-center"><p className="text-slate-400">No entries.</p></div> : (
-              <div className="space-y-2">{sorted.map(a => (
+              <div className="space-y-2">{sorted.map(({ entry: a, humanized: h, actorLabel, dateLabel, timeLabel }) => (
                 <div key={a.id} className="bg-white border border-slate-200 rounded-xl p-4 flex items-start justify-between gap-3">
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1 flex-wrap"><span className={`text-xs font-black px-2 py-0.5 rounded ${color(a.action)}`}>{a.action}</span><span className="text-xs font-bold text-slate-500">{a.actor}</span></div>
-                    <p className="text-sm text-slate-700">{a.details}</p>
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className={`text-xs font-black px-2 py-0.5 rounded ${AUDIT_TONE_CLASSES[h.tone] || AUDIT_TONE_CLASSES.slate}`}>{h.label}</span>
+                      <span className="text-xs font-bold text-slate-600">{actorLabel}</span>
+                      <span className="text-[10px] text-slate-400 font-mono bg-slate-50 border border-slate-100 rounded px-1.5 py-0.5">{a.action}</span>
+                    </div>
+                    <p className="text-sm text-slate-700">{h.sentence}</p>
                   </div>
-                  <div className="text-right shrink-0"><p className="text-xs text-slate-500">{new Date(a.timestamp).toLocaleDateString("en-IN")}</p><p className="text-xs text-slate-400">{new Date(a.timestamp).toLocaleTimeString("en-IN")}</p></div>
+                  <div className="text-right shrink-0">
+                    <p className="text-xs text-slate-500">{dateLabel}</p>
+                    <p className="text-xs text-slate-400">{timeLabel}</p>
+                  </div>
                 </div>
               ))}</div>
             )}
@@ -2788,11 +3191,26 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
     }
 
     function Interview({ context, applicationId, onEnd, onAbandon }) {
-      const MAX_AI = 5;
       const RESOLVE_TIMEOUT_MS = 90000;
+      const getScriptedList = (scr, ph) => {
+        if (!scr) return [];
+        if (ph === "opening") return scr.opening || [];
+        if (ph === "hr") return scr.role && scr.role.length ? scr.role : (scr.questions || []);
+        if (ph === "closing") return scr.closing || [];
+        return [];
+      };
+      const isScriptedPhase = (ph) => ph === "opening" || ph === "hr" || ph === "closing";
+      const initialPhaseFromScript = (d) => {
+        if ((d.opening || []).length) return "opening";
+        if ((d.role || []).length) return "hr";
+        if ((d.closing || []).length) return "closing";
+        return "ai";
+      };
       const [phase, setPhase] = useState("load");
       const [script, setScript] = useState(null);
-      const [hrIdx, setHrIdx] = useState(0);
+      const MAX_AI = Math.min(30, Math.max(1, Number(script?.aiFollowUpCount) || 12));
+      const AI_DIFFICULTY = ["easy", "medium", "hard"].includes(script?.aiDifficulty) ? script.aiDifficulty : "medium";
+      const [phaseIdx, setPhaseIdx] = useState(0);
       const hrPayloadRef = useRef([]);
       const [msgs, setMsgs] = useState([]);
       const [busy, setBusy] = useState(false);
@@ -2814,6 +3232,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
         hrIntroDoneRef.current = false;
         aiBootRef.current = false;
         hrTranslateCacheRef.current = {};
+        setPhaseIdx(0);
         setInterviewStarted(false);
       }, [applicationId]);
       const visHideTimerRef = useRef(null);
@@ -2854,7 +3273,32 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
       const startAutoListenAfterQuestionRef = useRef(() => {});
       const langMap = { English: "en-IN", Hindi: "hi-IN", Bengali: "bn-IN", Tamil: "ta-IN", Telugu: "te-IN", Kannada: "kn-IN", Marathi: "mr-IN", Gujarati: "gu-IN", Malayalam: "ml-IN" };
       const langCode = langMap[context.language] || "en-IN";
-      const sysAi = `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE question. After ${MAX_AI} questions, end with [INTERVIEW_COMPLETE].`;
+      const buildSysAi = (scr) => {
+        const topics = (scr?.doNotRepeatTopics || []).slice(0, 30).map((t, i) => (i + 1) + ". " + t).join("\n");
+        const desc = scr?.jobDescription || context.jd?.description || "";
+        const req = scr?.jobRequirements || context.jd?.requirements || "";
+        const difficulty = ["easy", "medium", "hard"].includes(scr?.aiDifficulty) ? scr.aiDifficulty : AI_DIFFICULTY;
+        const total = Math.min(30, Math.max(1, Number(scr?.aiFollowUpCount) || MAX_AI));
+        const difficultyBlock = {
+          easy: "Difficulty: EASY. Ask straightforward role basics — definitions, daily duties, fundamental tools, simple scenarios. Keep questions accessible to candidates with limited experience. Avoid multi-step problems and edge cases.",
+          medium: "Difficulty: MEDIUM. Ask standard role competency questions — situational judgement, moderate-complexity scenarios, single-step problem solving, common pitfalls. Probe both knowledge and applied judgement.",
+          hard: "Difficulty: HARD. Ask senior-level scenario-based questions — multi-step problems, edge cases, deep technical probing, behavioural STAR with complications. Press on trade-offs, decision-making under constraints, and ownership.",
+        }[difficulty];
+        return `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE role-specific question per turn about skills, experience, or scenarios for THIS job only.
+
+${difficultyBlock}
+
+You will ask ${total} role-specific follow-up questions in total. Cover DISTINCT facets each turn (e.g. technical depth, hands-on tools, scenario judgement, collaboration, problem-solving under constraints, role-specific edge cases, behaviour under pressure, communication with stakeholders, ownership and trade-offs). Do not cluster on one topic; rotate facets across turns and go progressively deeper.
+
+Already asked (NEVER repeat or rephrase):
+${topics || "(none)"}
+
+Job description: ${desc}
+Requirements: ${req}
+
+Do NOT ask: introduce yourself, tell me about yourself, why this company, name confirmation, or any topic already covered above.
+After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
+      };
       const translateHrScriptLine = useCallback(
         async (raw) => {
           const t = (raw == null ? "" : String(raw)).trim();
@@ -3045,7 +3489,8 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
           .then((d) => {
             if (!cancelled) {
               setScript(d);
-              setPhase("hr");
+              setPhaseIdx(0);
+              setPhase(initialPhaseFromScript(d));
               fetch("/api/voice-bot/interview-session-start", {
                 method: "POST",
                 headers: { "Content-Type": "application/json", ...authHeaders() },
@@ -3064,14 +3509,17 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
         return () => clearTimeout(t);
       }, [applicationId]);
       useEffect(() => {
-        if (phase !== "hr" || !script?.questions?.length || !interviewStarted) return;
+        if (!isScriptedPhase(phase) || !interviewStarted || !script) return;
+        if (phaseIdx !== 0) return;
+        const qs = getScriptedList(script, phase);
+        if (!qs.length) return;
         let cancelled = false;
         (async () => {
           await new Promise((r) => setTimeout(r, 400));
           if (cancelled) return;
           if (hrIntroDoneRef.current) return;
           hrIntroDoneRef.current = true;
-          const q0 = script.questions[0];
+          const q0 = qs[0];
           setBusy(true);
           let toSpeak = q0.question;
           try {
@@ -3082,12 +3530,29 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
             return;
           }
           setBusy(false);
-          setMsgs([{ role: "ai", text: toSpeak, tag: "hr" }]);
+          setMsgs((p) => [...p, { role: "ai", text: toSpeak, tag: phase }]);
           await speak(toSpeak);
           if (!cancelled) startAutoListenAfterQuestionRef.current();
         })();
         return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
-      }, [phase, script, interviewStarted, translateHrScriptLine]);
+      }, [phase, script, interviewStarted, translateHrScriptLine, phaseIdx]);
+      useEffect(() => {
+        if (!script || phase === "load" || phase === "err" || phase === "ai") return;
+        const qs = getScriptedList(script, phase);
+        if (qs.length > 0) return;
+        hrIntroDoneRef.current = false;
+        if (phase === "opening") { setPhaseIdx(0); setPhase("hr"); }
+        else if (phase === "hr") { setPhaseIdx(0); setPhase((script.closing || []).length ? "closing" : "ai"); }
+        else if (phase === "closing") {
+          setEnded(true);
+          const transcriptOut = msgs.map((m) => ({ role: m.role, text: m.text }));
+          setTimeout(() => onEnd(transcriptOut), 450);
+        }
+      }, [phase, script]);
+      useEffect(() => {
+        if (!isScriptedPhase(phase)) return;
+        hrIntroDoneRef.current = false;
+      }, [phase]);
       useEffect(() => {
         if (phase !== "ai") return;
         let cancelled = false;
@@ -3097,7 +3562,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
           if (aiBootRef.current) return;
           aiBootRef.current = true;
           setBusy(true);
-          const r0 = await callClaude([{ role: "user", content: "Start." }], sysAi);
+          const r0 = await callClaude([{ role: "user", content: "Start." }], buildSysAi(script));
           if (cancelled) return;
           const clean = r0.replace("[INTERVIEW_COMPLETE]", "").trim();
           setMsgs((p) => [...p, { role: "ai", text: clean, tag: "ai" }]);
@@ -3130,14 +3595,25 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
         }
       };
       startAutoListenAfterQuestionRef.current = startAutoListenAfterQuestion;
+      const postScriptedAnswers = async (finalize) => {
+        try {
+          await fetch("/api/voice-bot/interview-answers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", ...authHeaders() },
+            body: JSON.stringify({ applicationId, answers: hrPayloadRef.current, finalizeInterview: !!finalize }),
+          });
+        } catch (e) { console.error(e); }
+      };
       const dispatchAnswer = async (text) => {
         const answer = (text || "").trim();
         if (!answer || busy || ended) return;
         accumulatedAnswerRef.current = "";
         setTranscript(""); txRef.current = ""; setTextInput(""); setMicError("");
-        if (phase === "hr" && script?.questions?.length) {
-          const cur = script.questions[hrIdx];
-          setMsgs((p) => [...p, { role: "user", text: answer, tag: "hr" }]);
+        if (isScriptedPhase(phase) && script) {
+          const qs = getScriptedList(script, phase);
+          if (!qs.length) return;
+          const cur = qs[phaseIdx];
+          setMsgs((p) => [...p, { role: "user", text: answer, tag: phase }]);
           hrPayloadRef.current.push({
             questionId: cur.id > 0 ? cur.id : null,
             questionText: cur.question,
@@ -3145,30 +3621,42 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
             audioUrl: null,
             durationSeconds: null,
           });
-          const nextIdx = hrIdx + 1;
-          if (nextIdx < script.questions.length) {
-            setHrIdx(nextIdx);
+          const nextIdx = phaseIdx + 1;
+          if (nextIdx < qs.length) {
+            setPhaseIdx(nextIdx);
+            hrIntroDoneRef.current = false;
             setBusy(true);
-            const nq = script.questions[nextIdx];
+            const nq = qs[nextIdx];
             let toSpeak = nq.question;
             try {
               toSpeak = await translateHrScriptLine(nq.question);
             } catch (_) {}
-            setMsgs((p) => [...p, { role: "ai", text: toSpeak, tag: "hr" }]);
+            setMsgs((p) => [...p, { role: "ai", text: toSpeak, tag: phase }]);
             setBusy(false);
             await speak(toSpeak);
             startAutoListenAfterQuestion();
-          } else {
+          } else if (phase === "opening") {
+            setPhaseIdx(0);
+            hrIntroDoneRef.current = false;
+            setPhase("hr");
+          } else if (phase === "hr") {
             setBusy(true);
-            try {
-              await fetch("/api/voice-bot/interview-answers", {
-                method: "POST",
-                headers: { "Content-Type": "application/json", ...authHeaders() },
-                body: JSON.stringify({ applicationId, answers: hrPayloadRef.current }),
-              });
-            } catch (e) { console.error(e); }
+            await postScriptedAnswers(false);
             setBusy(false);
+            aiBootRef.current = false;
             setPhase("ai");
+          } else if (phase === "closing") {
+            setBusy(true);
+            await postScriptedAnswers(true);
+            setBusy(false);
+            let transcriptOut = null;
+            setMsgs((p) => {
+              const next = [...p];
+              transcriptOut = next.map((m) => ({ role: m.role, text: m.text }));
+              return next;
+            });
+            setEnded(true);
+            setTimeout(() => onEnd(transcriptOut || msgs.map((m) => ({ role: m.role, text: m.text }))), 450);
           }
           return;
         }
@@ -3176,7 +3664,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
           const prevAiQCount = aiQCount;
           const h = [...hist, { role: "user", content: answer }];
           setBusy(true);
-          const r = await callClaude(h, sysAi);
+          const r = await callClaude(h, buildSysAi(script));
           const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
           setHist([...h, { role: "assistant", content: r }]);
           setAiQCount((c) => c + 1);
@@ -3190,8 +3678,16 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
           });
           await speak(clean);
           if (nextUserTurnCount >= MAX_AI && transcriptOut) {
-            setEnded(true);
-            setTimeout(() => onEnd(transcriptOut), 450);
+            const closingQs = getScriptedList(script, "closing");
+            if (closingQs.length) {
+              setPhase("closing");
+              setPhaseIdx(0);
+              hrIntroDoneRef.current = false;
+            } else {
+              await postScriptedAnswers(true);
+              setEnded(true);
+              setTimeout(() => onEnd(transcriptOut), 450);
+            }
           } else {
             startAutoListenAfterQuestion();
           }
@@ -3227,8 +3723,9 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
         onEnd(msgs);
       };
       const lastQ = [...msgs].reverse().find((m) => m.role === "ai");
-      const hrTotal = script?.questions?.length || 0;
-      const phaseLabel = phase === "hr" ? `Role-specific · ${Math.min(hrIdx + 1, hrTotal)}/${hrTotal || "—"}` : phase === "ai" ? `Follow-up · ${aiQCount}/${MAX_AI}` : "";
+      const scriptedQs = isScriptedPhase(phase) ? getScriptedList(script, phase) : [];
+      const scriptedTotal = scriptedQs.length;
+      const phaseLabel = phase === "opening" ? `Introduction · ${Math.min(phaseIdx + 1, scriptedTotal)}/${scriptedTotal || "—"}` : phase === "hr" ? `Role-specific · ${Math.min(phaseIdx + 1, scriptedTotal)}/${scriptedTotal || "—"}` : phase === "closing" ? `Closing · ${Math.min(phaseIdx + 1, scriptedTotal)}/${scriptedTotal || "—"}` : phase === "ai" ? `Follow-up · ${aiQCount}/${MAX_AI}` : "";
       if (phase === "load") {
         return (
           <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-8">
@@ -3261,7 +3758,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
               {busy && <p className="text-indigo-300 text-sm animate-pulse">Swar is thinking…</p>}
               {speaking && !busy && <p className="text-indigo-300 text-sm">🔊 Swar is speaking</p>}
               {listening && <p className="text-red-300 text-sm animate-pulse">🎤 Listening…</p>}
-              {!busy && !speaking && !listening && !ended && phase === "hr" && script?.questions?.length > 0 && !interviewStarted && (
+              {!busy && !speaking && !listening && !ended && isScriptedPhase(phase) && getScriptedList(script, phase).length > 0 && !interviewStarted && (
                 <p className="text-slate-400 text-sm max-w-md mx-auto">Press Start once — after each question, speak your answer; it sends after {SILENCE_SUBMIT_MS / 1000}s of silence.</p>
               )}
               {ended && <p className="text-green-300 text-sm">✓ Complete</p>}
@@ -3269,7 +3766,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
             </div>
             {lastQ && <div className="max-w-xl w-full bg-slate-800 border border-slate-700 rounded-2xl p-5 mb-4 text-center"><p className="text-xs uppercase font-black text-indigo-400 mb-2">Question</p><p className="text-white text-base">{lastQ.text}</p></div>}
             {(transcript || listening) && <div className="max-w-xl w-full bg-red-900/20 border border-red-800/50 rounded-2xl p-4 mb-4"><p className="text-xs uppercase font-black text-red-300 mb-1">Your answer</p><p className="text-white">{transcript || <span className="text-slate-500 italic">Speak now…</span>}</p></div>}
-            {!ended && supported && phase === "hr" && script?.questions?.length > 0 && !interviewStarted && (
+            {!ended && supported && isScriptedPhase(phase) && getScriptedList(script, phase).length > 0 && !interviewStarted && (
               <div className="flex flex-col items-center gap-3 my-4">
                 <button
                   type="button"
@@ -3287,7 +3784,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
                 <button type="button" onClick={() => sendAnswer(textInput)} disabled={!textInput.trim() || busy} className="px-5 py-3 bg-indigo-600 text-white font-bold rounded-xl text-sm disabled:bg-slate-700">Send</button>
               </div>
             )}
-            {supported && !showText && !ended && (phase !== "hr" || interviewStarted) && (
+            {supported && !showText && !ended && (!isScriptedPhase(phase) || interviewStarted) && (
               <button type="button" onClick={() => setShowText(true)} className="text-slate-500 text-xs mt-3 underline">Type instead</button>
             )}
             {!supported && <div className="bg-amber-900/30 border border-amber-700 rounded-xl p-4 text-center text-amber-200 text-sm max-w-md">⚠ Browser doesn't support voice. Use text.</div>}
@@ -3656,6 +4153,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
       const [analysisSessionId, setAnalysisSessionId] = useState(0);
       const [portalFocusJobId, setPortalFocusJobId] = useState(null);
       const [jobs, setJobs] = useState([]), [candidates, setCandidates] = useState([]), [talentPool, setTalentPool] = useState([]), [auditLog, setAuditLog] = useState([]);
+      const [hrUsers, setHrUsers] = useState({});
       const [reattemptPendingCount, setReattemptPendingCount] = useState(0);
       const [meta, setMeta] = useState(null);
       const [storageReady, setStorageReady] = useState(false);
@@ -3703,6 +4201,24 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
         refreshReattemptCount();
         const id = setInterval(refreshReattemptCount, 60000);
         return () => clearInterval(id);
+      }, [role, storageReady]);
+
+      const refreshHrUsers = async () => {
+        const tok = localStorage.getItem(LS_TOKEN);
+        if (!tok || localStorage.getItem(LS_ROLE) !== "hr") return;
+        try {
+          const r = await fetch("/api/admin/hr-users", { headers: { Authorization: `Bearer ${tok}` } });
+          if (!r.ok) return;
+          const j = await r.json();
+          const map = {};
+          for (const u of j.users || []) {
+            if (u && u.hrId) map[u.hrId] = u.displayName || "";
+          }
+          setHrUsers(map);
+        } catch (_) {}
+      };
+      useEffect(() => {
+        refreshHrUsers();
       }, [role, storageReady]);
 
       const syncStateFromServer = async () => {
@@ -4254,7 +4770,7 @@ Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the 
               <ReattemptQueue onBack={() => { setStep("HR"); refreshReattemptCount(); }} onResolved={async () => { await syncStateFromServer(); await refreshReattemptCount(); }} />
             </HRBridge>
           )}
-          {step === "AUDIT" && <AuditLogView auditLog={auditLog} onBack={() => setStep("HR")}/>}
+          {step === "AUDIT" && <AuditLogView auditLog={auditLog} candidates={candidates} hrUsers={hrUsers} onRefresh={refreshHrUsers} onBack={() => setStep("HR")}/>}
           {step === "CV_ANALYSER" && (
             <HRBridge onLogout={logout}>
               <CVAnalyserPage jobs={jobs} onBack={() => { navigate("/hr"); setStep("HR"); }} onSynced={syncStateFromServer} />
