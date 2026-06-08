@@ -27,13 +27,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const setAuth = useCallback(
     (payload: {
-      token: string;
+      token?: string;
       role: UserRole;
       hrId?: string;
       candidateId?: string;
     }) => {
       writeAuthToStorage(payload);
-      setToken(payload.token);
+      setToken(payload.token ?? (payload.role ? "cookie" : null));
       setRole(payload.role);
       setHrId(payload.hrId ?? null);
       setCandidateId(payload.candidateId ?? null);
