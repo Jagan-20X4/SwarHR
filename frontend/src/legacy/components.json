@@ -1,0 +1,222 @@
+{
+  "source": "frontend/index.html",
+  "babelScript": {
+    "startLine": 135,
+    "endLine": 5105
+  },
+  "excluded": "ReactDOM.createRoot (line 5107+)",
+  "outputFile": "src/legacy/rawApp.jsx",
+  "componentCount": 35,
+  "components": [
+    {
+      "name": "HRBridge",
+      "startLine": 424,
+      "endLine": 430,
+      "lineCount": 7
+    },
+    {
+      "name": "HRRedirectOnce",
+      "startLine": 431,
+      "endLine": 451,
+      "lineCount": 21
+    },
+    {
+      "name": "HRIframeShell",
+      "startLine": 452,
+      "endLine": 734,
+      "lineCount": 283
+    },
+    {
+      "name": "Badge",
+      "startLine": 735,
+      "endLine": 735,
+      "lineCount": 1
+    },
+    {
+      "name": "Spin",
+      "startLine": 736,
+      "endLine": 737,
+      "lineCount": 2
+    },
+    {
+      "name": "Modal",
+      "startLine": 738,
+      "endLine": 751,
+      "lineCount": 14
+    },
+    {
+      "name": "PrivacyModal",
+      "startLine": 752,
+      "endLine": 770,
+      "lineCount": 19
+    },
+    {
+      "name": "ForgotPassword",
+      "startLine": 771,
+      "endLine": 813,
+      "lineCount": 43
+    },
+    {
+      "name": "ConsentScreen",
+      "startLine": 814,
+      "endLine": 858,
+      "lineCount": 45
+    },
+    {
+      "name": "Login",
+      "startLine": 859,
+      "endLine": 935,
+      "lineCount": 77
+    },
+    {
+      "name": "ReattemptQueue",
+      "startLine": 936,
+      "endLine": 1041,
+      "lineCount": 106
+    },
+    {
+      "name": "HRDash",
+      "startLine": 1042,
+      "endLine": 1100,
+      "lineCount": 59
+    },
+    {
+      "name": "CandidateDetail",
+      "startLine": 1101,
+      "endLine": 1330,
+      "lineCount": 230
+    },
+    {
+      "name": "JobMaster",
+      "startLine": 1331,
+      "endLine": 1562,
+      "lineCount": 232
+    },
+    {
+      "name": "CandReg",
+      "startLine": 1563,
+      "endLine": 1580,
+      "lineCount": 18
+    },
+    {
+      "name": "JobBoardAuth",
+      "startLine": 1581,
+      "endLine": 1691,
+      "lineCount": 111
+    },
+    {
+      "name": "Jobs",
+      "startLine": 1692,
+      "endLine": 1799,
+      "lineCount": 108
+    },
+    {
+      "name": "CVUpload",
+      "startLine": 1800,
+      "endLine": 1827,
+      "lineCount": 28
+    },
+    {
+      "name": "TalentPoolSubmit",
+      "startLine": 1828,
+      "endLine": 2049,
+      "lineCount": 222
+    },
+    {
+      "name": "TalentPoolPdfPage",
+      "startLine": 2050,
+      "endLine": 2069,
+      "lineCount": 20
+    },
+    {
+      "name": "TalentPoolPdfViewer",
+      "startLine": 2070,
+      "endLine": 2111,
+      "lineCount": 42
+    },
+    {
+      "name": "ResumePreviewModal",
+      "startLine": 2112,
+      "endLine": 2182,
+      "lineCount": 71
+    },
+    {
+      "name": "TalentPoolBrowse",
+      "startLine": 2183,
+      "endLine": 2440,
+      "lineCount": 258
+    },
+    {
+      "name": "AuditLogView",
+      "startLine": 2441,
+      "endLine": 2544,
+      "lineCount": 104
+    },
+    {
+      "name": "CVResultCard",
+      "startLine": 2545,
+      "endLine": 2690,
+      "lineCount": 146
+    },
+    {
+      "name": "CVAnalyserPage",
+      "startLine": 2691,
+      "endLine": 3170,
+      "lineCount": 480
+    },
+    {
+      "name": "Screening",
+      "startLine": 3171,
+      "endLine": 3196,
+      "lineCount": 26
+    },
+    {
+      "name": "InterviewScheduleModal",
+      "startLine": 3197,
+      "endLine": 3213,
+      "lineCount": 17
+    },
+    {
+      "name": "Intro",
+      "startLine": 3214,
+      "endLine": 3259,
+      "lineCount": 46
+    },
+    {
+      "name": "Interview",
+      "startLine": 3260,
+      "endLine": 3862,
+      "lineCount": 603
+    },
+    {
+      "name": "Done",
+      "startLine": 3863,
+      "endLine": 3902,
+      "lineCount": 40
+    },
+    {
+      "name": "Analysis",
+      "startLine": 3903,
+      "endLine": 4051,
+      "lineCount": 149
+    },
+    {
+      "name": "CandDash",
+      "startLine": 4052,
+      "endLine": 4195,
+      "lineCount": 144
+    },
+    {
+      "name": "RightsPanel",
+      "startLine": 4196,
+      "endLine": 4213,
+      "lineCount": 18
+    },
+    {
+      "name": "App",
+      "startLine": 4214,
+      "endLine": 5105,
+      "lineCount": 892
+    }
+  ]
+}

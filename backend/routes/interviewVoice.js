@@ -1,29 +1,17 @@
 const express = require("express");
 const crypto = require("crypto");
 const { voiceBotAuth, voiceBotTokenRoles } = require("../middleware/serviceToken");
-const { verify } = require("../jwt");
+const { requireHr } = require("../middleware/auth");
 const { getFallbackQuestionTexts } = require("../lib/fallbackQuestions");
 const { buildInterviewScriptFromRows } = require("../lib/interviewScript");
-
-function bearerHrId(req) {
-  const h = req.headers.authorization;
-  const raw =
-    h && h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-  if (!raw) return null;
-  const payload = verify(raw);
-  if (!payload || payload.typ !== "hr" || !payload.sub) return null;
-  return payload.sub;
-}
-
-function requireHr(req, res, next) {
-  const id = bearerHrId(req);
-  if (!id) {
-    res.status(401).json({ error: "Unauthorized" });
-    return;
-  }
-  req.hrId = id;
-  next();
-}
+const {
+  getOrCreateInterviewAttempt,
+  completeInterviewAttempt,
+  upsertInterviewAnswer,
+  countInterviewAnswers,
+  interviewAnswersRequireAttemptId,
+} = require("../lib/interviewAttempts");
+const { markApplicationInterviewComplete } = require("../lib/interviewFinalize");
 
 function auditId() {
   return `AUD-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -208,7 +196,8 @@ function createVoiceBotRouter(pool) {
   });
 
   r.post("/interview-answers", auth, async (req, res) => {
-    const { applicationId, answers, finalizeInterview } = req.body || {};
+    const { applicationId, answers, finalizeInterview, attemptId: attemptIdRaw } =
+      req.body || {};
     const appId = parseInt(applicationId, 10);
     if (!Number.isFinite(appId) || !Array.isArray(answers)) {
       res.status(400).json({ error: "applicationId and answers[] required" });
@@ -234,6 +223,32 @@ function createVoiceBotRouter(pool) {
         return;
       }
 
+      let attemptId = parseInt(attemptIdRaw, 10);
+      if (Number.isFinite(attemptId)) {
+        try {
+          const chk = await client.query(
+            "SELECT id FROM interview_attempts WHERE id = $1 AND application_id = $2",
+            [attemptId, appId],
+          );
+          if (chk.rows.length === 0) attemptId = NaN;
+        } catch (e) {
+          if (e.code === "42P01") attemptId = NaN;
+          else if (e.code !== "42703") throw e;
+        }
+      }
+      if (!Number.isFinite(attemptId)) {
+        attemptId = await getOrCreateInterviewAttempt(client, appId);
+      }
+      const requireAttempt = await interviewAnswersRequireAttemptId(client);
+      if (requireAttempt && attemptId == null) {
+        await client.query("ROLLBACK");
+        res.status(503).json({
+          error:
+            "Interview attempts are required but interview_attempts table is missing or misconfigured. Run database/migration_interview_attempts.sql",
+        });
+        return;
+      }
+
       let totalDuration = 0;
       for (const a of answers) {
         const qtext = String(a.questionText || "").trim();
@@ -248,19 +263,15 @@ function createVoiceBotRouter(pool) {
           a.durationSeconds != null ? parseInt(a.durationSeconds, 10) : null;
         if (dur && Number.isFinite(dur) && dur > 0) totalDuration += dur;
 
-        await client.query(
-          `INSERT INTO interview_answers
-            (application_id, question_id, question_text, answer_text, audio_url, duration_seconds, answered_at)
-           VALUES ($1,$2,$3,$4,$5,$6, NOW())
-           ON CONFLICT (application_id, question_text)
-           DO UPDATE SET
-             question_id = COALESCE(EXCLUDED.question_id, interview_answers.question_id),
-             answer_text = EXCLUDED.answer_text,
-             audio_url = COALESCE(EXCLUDED.audio_url, interview_answers.audio_url),
-             duration_seconds = COALESCE(EXCLUDED.duration_seconds, interview_answers.duration_seconds),
-             answered_at = NOW()`,
-          [appId, qid, qtext, atext, audioUrl, dur],
-        );
+        await upsertInterviewAnswer(client, {
+          applicationId: appId,
+          attemptId,
+          questionId: qid,
+          questionText: qtext,
+          answerText: atext,
+          audioUrl,
+          durationSeconds: dur,
+        });
       }
 
       const needRes = await client.query(
@@ -270,11 +281,7 @@ function createVoiceBotRouter(pool) {
       let expected = needRes.rows[0]?.n ?? 0;
       if (expected === 0) expected = getFallbackQuestionTexts().length;
 
-      const cntRes = await client.query(
-        `SELECT COUNT(*)::int AS n FROM interview_answers WHERE application_id = $1`,
-        [appId],
-      );
-      const answered = cntRes.rows[0]?.n ?? 0;
+      const answered = await countInterviewAnswers(client, appId, attemptId);
 
       const shouldFinalize =
         finalizeInterview === true && answered >= expected;
@@ -315,28 +322,22 @@ function createVoiceBotRouter(pool) {
         } catch (_) {
           /* recruitment_stage column / migration optional */
         }
-        try {
-          await client.query(
-            `UPDATE application SET
-               interview_completion_status = 'completed',
-               reattempt_request_status = 'none',
-               reattempt_candidate_reason_code = NULL,
-               reattempt_candidate_reason_text = NULL,
-               reattempt_hr_reason_code = NULL,
-               reattempt_hr_notes = NULL,
-               reattempt_requested_at = NULL,
-               reattempt_resolved_at = NULL,
-               reattempt_resolved_by_hr_id = NULL
-             WHERE id = $1`,
-            [appId],
-          );
-        } catch (_) {
-          /* reattempt migration optional */
-        }
+        await markApplicationInterviewComplete(client, {
+          applicationId: appId,
+          candidateId: appRow.candidate_id,
+          clearReattempt: true,
+        });
+        await completeInterviewAttempt(client, attemptId);
       }
 
       await client.query("COMMIT");
-      res.json({ ok: true, answered, expected, screeningUpdated: answered >= expected });
+      res.json({
+        ok: true,
+        answered,
+        expected,
+        attemptId: attemptId ?? undefined,
+        screeningUpdated: answered >= expected,
+      });
     } catch (e) {
       await client.query("ROLLBACK");
       console.error(e);
@@ -381,7 +382,12 @@ function createVoiceBotRouter(pool) {
       } catch (_) {
         /* optional columns */
       }
-      res.json({ ok: true, applicationId });
+      const attemptId = await getOrCreateInterviewAttempt(client, applicationId);
+      res.json({
+        ok: true,
+        applicationId,
+        attemptId: attemptId ?? undefined,
+      });
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: String(e.message || e) });
@@ -561,16 +567,32 @@ function createAdminInterviewRouter(pool) {
       }
       const client = await pool.connect();
       try {
-        const rows = await client.query(
-          `SELECT ia.id, ia.question_id, ia.question_text, ia.answer_text, ia.audio_url,
-                  ia.duration_seconds, ia.asked_at, ia.answered_at,
-                  jiq.question_type
-           FROM interview_answers ia
-           LEFT JOIN job_interview_questions jiq ON jiq.id = ia.question_id
-           WHERE ia.application_id = $1
-           ORDER BY ia.asked_at, ia.id`,
-          [applicationId],
-        );
+        let rows;
+        try {
+          rows = await client.query(
+            `SELECT ia.id, ia.question_id, ia.question_text, ia.answer_text, ia.audio_url,
+                    ia.duration_seconds, ia.asked_at, ia.answered_at,
+                    jiq.question_type, jiq.question_phase
+             FROM interview_answers ia
+             LEFT JOIN job_interview_questions jiq ON jiq.id = ia.question_id
+             WHERE ia.application_id = $1
+             ORDER BY ia.asked_at NULLS LAST, ia.id`,
+            [applicationId],
+          );
+        } catch (e) {
+          if (e.code === "42703") {
+            rows = await client.query(
+              `SELECT ia.id, ia.question_id, ia.question_text, ia.answer_text, ia.audio_url,
+                      ia.duration_seconds, ia.asked_at, ia.answered_at,
+                      jiq.question_type
+               FROM interview_answers ia
+               LEFT JOIN job_interview_questions jiq ON jiq.id = ia.question_id
+               WHERE ia.application_id = $1
+               ORDER BY ia.asked_at NULLS LAST, ia.id`,
+              [applicationId],
+            );
+          } else throw e;
+        }
         res.json({
           applicationId,
           answers: rows.rows.map((x, i) => ({
@@ -578,13 +600,14 @@ function createAdminInterviewRouter(pool) {
             questionId: x.question_id,
             questionText: x.question_text,
             questionType: x.question_type || "open_ended",
+            questionPhase: x.question_phase || null,
             answerText: x.answer_text,
             audioUrl: x.audio_url,
             durationSeconds: x.duration_seconds,
             askedAt: x.asked_at,
             answeredAt: x.answered_at,
           })),
-        }        );
+        });
       } catch (e) {
         if (e.code === "42P01") {
           res.json({ applicationId, answers: [] });

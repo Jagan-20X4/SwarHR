@@ -80,7 +80,15 @@ npm install
 npm run dev
 ```
 
-Open **http://localhost:3000**. The UI loads **`GET /api/state`** and saves changes with **`PUT /api/state`** (debounced). Candidate passwords are **never** returned from the API; login uses **`POST /api/auth/candidate/login`** and **`POST /api/auth/hr/login`**.
+Open **http://localhost:3000**. The UI loads **`GET /api/state`** (HR only) and saves with **`PUT /api/state`** (HR) or **`PUT /api/me`** (candidates). Candidate passwords are **never** returned from the API; login uses **`POST /api/auth/candidate/login`** and **`POST /api/auth/hr/login`**.
+
+### Production checklist (Phase 0)
+
+1. Set **`JWT_SECRET`** and **`VOICE_BOT_SERVICE_TOKEN`** in `backend/.env`.
+2. Run **`database/migration_s3_attachments.sql`** on existing databases.
+3. Configure **S3** vars in `backend/.env` (see `.env.example`).
+4. Health: **`GET /health`** (liveness), **`GET /ready`** (DB connectivity).
+5. Paginated HR list: **`GET /api/candidates?page=1&limit=50`** (requires HR JWT).
 
 ## Project layout
 

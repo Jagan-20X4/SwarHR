@@ -1,0 +1,102 @@
+/* Talent Community page — 3-column layout with alternating Vision / Mission / Values side panels. */
+.talent-3col {
+  display: grid;
+  grid-template-columns: 1fr min(560px, 100%) 1fr;
+  gap: 24px;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 32px 16px;
+  align-items: stretch;
+}
+.talent-center {
+  min-width: 0;
+  width: 100%;
+}
+.talent-side {
+  display: flex;
+  flex-direction: column;
+  padding-top: 80px;
+  padding-bottom: 32px;
+}
+.talent-side--left {
+  justify-content: space-between;
+  align-items: stretch;
+}
+.talent-side--right {
+  justify-content: center;
+  align-items: stretch;
+}
+.talent-side-img {
+  width: 100%;
+  height: auto;
+  border-radius: 16px;
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.1);
+  display: block;
+  opacity: 0;
+  transform: translateY(20px);
+  transition:
+    opacity 600ms ease-out,
+    transform 600ms ease-out;
+}
+.talent-side-img.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+@media (max-width: 1023px) {
+  .talent-3col {
+    grid-template-columns: 1fr min(440px, 100%) 1fr;
+    gap: 16px;
+  }
+  .talent-side {
+    padding-top: 56px;
+  }
+}
+@media (max-width: 767px) {
+  .talent-3col {
+    grid-template-columns: 1fr;
+    padding: 16px;
+  }
+  .talent-side {
+    display: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .talent-side-img {
+    transition: none;
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.talent-watermark {
+  position: relative;
+  min-height: 100vh;
+  isolation: isolate;
+}
+.talent-watermark::before,
+.talent-watermark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+.talent-watermark::before {
+  background-image: url("/Background.jpg");
+  background-size: 100% 100%;
+  background-position: top center;
+  background-repeat: no-repeat;
+  opacity: 0.18;
+}
+.talent-watermark::after {
+  background-color: rgba(255, 255, 255, 0.65);
+}
+.talent-watermark > * {
+  position: relative;
+  z-index: 1;
+}
+@media (max-width: 768px) {
+  .talent-watermark::before {
+    opacity: 0.14;
+  }
+}

@@ -1,0 +1,141 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const p = path.join(__dirname, "../src/app/state/AppStateProvider.tsx");
+let s = fs.readFileSync(p, "utf8");
+const marker = '  if (step === "LOADING") return (';
+const idx = s.indexOf(marker);
+if (idx < 0) {
+  console.error("marker not found");
+  process.exit(1);
+}
+const head = s.slice(0, idx);
+const tail = `
+  const value = useMemo(
+    () => ({
+      loc,
+      location,
+      navigate,
+      role,
+      setRole,
+      hrId,
+      setHrId,
+      activeId,
+      setActiveId,
+      selJob,
+      setSelJob,
+      pending,
+      setPending,
+      analysisApplicationId,
+      setAnalysisApplicationId,
+      analysisSessionId,
+      setAnalysisSessionId,
+      portalFocusJobId,
+      setPortalFocusJobId,
+      jobs,
+      setJobs,
+      candidates,
+      setCandidates,
+      talentPool,
+      setTalentPool,
+      auditLog,
+      setAuditLog,
+      hrUsers,
+      reattemptPendingCount,
+      meta,
+      storageReady,
+      canPersist,
+      setCanPersist,
+      tpFromPortal,
+      setTpFromPortal,
+      candidateLoginPreferHomeRef,
+      tpGuestEntryRef,
+      tpGuestRegPrefill,
+      setTpGuestRegPrefill,
+      scheduleBoardFlash,
+      setScheduleBoardFlash,
+      registerPhase,
+      setRegisterPhase,
+      interviewPhase,
+      setInterviewPhase,
+      active,
+      upd,
+      resolvedApplicationId,
+      company,
+      jd,
+      analysisRoleRows,
+      resolvedAnalysisApplicationId,
+      analysisDecisionRow,
+      hrDecisionAllowedAnalysis,
+      analysisLegacyOk,
+      analysisCanOpen,
+      cmCooling,
+      maxCvMb,
+      authCandidate,
+      authStripReady,
+      candidateFirstName,
+      syncStateFromServer,
+      refreshReattemptCount,
+      refreshHrUsers,
+      logAudit,
+      handlePasswordReset,
+      logout,
+      startInterview,
+      handleApplyToJob,
+      handleJobBoardApply,
+      handleCVUploaded,
+      handleTalentPoolMap,
+    }),
+    [
+      loc,
+      location,
+      navigate,
+      role,
+      hrId,
+      activeId,
+      selJob,
+      pending,
+      analysisApplicationId,
+      analysisSessionId,
+      portalFocusJobId,
+      jobs,
+      candidates,
+      talentPool,
+      auditLog,
+      hrUsers,
+      reattemptPendingCount,
+      meta,
+      storageReady,
+      canPersist,
+      tpFromPortal,
+      tpGuestRegPrefill,
+      scheduleBoardFlash,
+      registerPhase,
+      interviewPhase,
+      active,
+      resolvedApplicationId,
+      company,
+      jd,
+      analysisRoleRows,
+      resolvedAnalysisApplicationId,
+      analysisDecisionRow,
+      hrDecisionAllowedAnalysis,
+      analysisLegacyOk,
+      analysisCanOpen,
+      cmCooling,
+      maxCvMb,
+      authCandidate,
+      authStripReady,
+      candidateFirstName,
+    ],
+  );
+
+  return (
+    <AppStateContext.Provider value={value}>{children}</AppStateContext.Provider>
+  );
+}
+`;
+fs.writeFileSync(p, head + tail);
+console.log("trimmed provider to", head.length + tail.length, "bytes");

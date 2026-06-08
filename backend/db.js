@@ -1,5 +1,9 @@
 const { Pool } = require("pg");
 
+function isProductionEnv() {
+  return process.env.NODE_ENV === "production";
+}
+
 /**
  * Connection priority:
  * 1. PG_HOST + PG_USER + PG_PASSWORD + PG_DATABASE (+ PG_PORT) — RDS / split vars
@@ -25,7 +29,22 @@ function shouldUseSsl(hostRaw, port) {
   return false;
 }
 
+function poolMaxConnections() {
+  const v = parseInt(process.env.PG_POOL_MAX || "10", 10);
+  return Number.isFinite(v) && v > 0 ? v : 10;
+}
+
+/** In production with SSL, default to verifying server cert unless explicitly disabled. */
+function sslRejectUnauthorized() {
+  const raw = process.env.PG_SSL_REJECT_UNAUTHORIZED;
+  if (raw === "false" || raw === "0") return false;
+  if (raw === "true" || raw === "1") return true;
+  return isProductionEnv();
+}
+
 function buildPoolConfig() {
+  const max = poolMaxConnections();
+
   const hostRaw = process.env.PG_HOST && process.env.PG_HOST.trim();
 
   if (hostRaw) {
@@ -42,12 +61,12 @@ function buildPoolConfig() {
       database,
       user,
       password,
-      max: 10,
+      max,
     };
 
     if (useSsl) {
       config.ssl = {
-        rejectUnauthorized: process.env.PG_SSL_REJECT_UNAUTHORIZED === "true",
+        rejectUnauthorized: sslRejectUnauthorized(),
       };
     }
 
@@ -55,13 +74,21 @@ function buildPoolConfig() {
   }
 
   if (process.env.DATABASE_URL && process.env.DATABASE_URL.trim()) {
-    return {
+    const config = {
       connectionString: process.env.DATABASE_URL,
-      max: 10,
+      max,
     };
+    if (
+      process.env.PG_SSL === "true" ||
+      process.env.PG_SSL === "1" ||
+      /\.rds\.amazonaws\.com/i.test(process.env.DATABASE_URL)
+    ) {
+      config.ssl = { rejectUnauthorized: sslRejectUnauthorized() };
+    }
+    return config;
   }
 
-  return { connectionString: undefined, max: 10 };
+  return { connectionString: undefined, max };
 }
 
 const pool = new Pool(buildPoolConfig());
@@ -70,4 +97,4 @@ pool.on("error", (err) => {
   console.error("PostgreSQL pool error", err);
 });
 
-module.exports = { pool };
+module.exports = { pool, poolMaxConnections };

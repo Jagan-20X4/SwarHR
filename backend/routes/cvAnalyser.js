@@ -1,7 +1,7 @@
 const crypto = require("crypto");
 const express = require("express");
 const multer = require("multer");
-const { verify } = require("../jwt");
+const { requireHr: requireHR } = require("../middleware/auth");
 const {
   sniffMime,
   extFromName,
@@ -39,23 +39,6 @@ function createCvAnalyserRouter({ pool }) {
     storage: multer.memoryStorage(),
     limits: { fileSize: maxBytes, files: maxFiles },
   });
-
-  function requireHR(req, res, next) {
-    const h = req.headers.authorization;
-    const raw =
-      h && h.startsWith("Bearer ") ? h.slice(7).trim() : "";
-    if (!raw) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    const payload = verify(raw);
-    if (!payload || payload.typ !== "hr" || !payload.sub) {
-      res.status(401).json({ error: "Unauthorized" });
-      return;
-    }
-    req.hrId = payload.sub;
-    next();
-  }
 
   function rateLimitBatch(req, res, next) {
     const hrId = req.hrId;

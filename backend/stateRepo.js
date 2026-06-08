@@ -1,21 +1,21 @@
 const bcrypt = require("bcryptjs");
 const { normalizeInterviewQuestionsForSave } = require("./lib/interviewScript");
+const {
+  CV_SELECT_WITH_S3,
+  cvFileFromDbRow,
+  resolveCvUpload,
+  insertCvAttachmentRow,
+  deleteAttachment,
+  isFreshDataUrl,
+} = require("./lib/cvStorage");
+const { wrapS3Error } = require("./lib/apiErrors");
+const {
+  repairCompletedInterviewsForCandidate,
+  repairCompletedInterviewsForCandidateIds,
+} = require("./lib/interviewFinalize");
 
 function looksLikeBcrypt(s) {
   return typeof s === "string" && s.startsWith("$2") && s.length > 50;
-}
-
-function dataUrlFromRow(row) {
-  if (!row || !row.file_data_base64) return null;
-  const mime = row.mime_type || "application/octet-stream";
-  return `data:${mime};base64,${row.file_data_base64}`;
-}
-
-function stripBase64Prefix(dataUrl) {
-  if (!dataUrl || typeof dataUrl !== "string") return null;
-  const i = dataUrl.indexOf("base64,");
-  if (i === -1) return dataUrl;
-  return dataUrl.slice(i + 7);
 }
 
 function getLatestAppForJob(history, jobId) {
@@ -24,6 +24,327 @@ function getLatestAppForJob(history, jobId) {
   return [...past].sort(
     (a, b) => new Date(b.appliedAt) - new Date(a.appliedAt),
   )[0];
+}
+
+function parseExplicitApplicationId(a) {
+  const n = Number(a?.applicationId);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function applicationFieldValues(a) {
+  const ic =
+    a.interviewCompletionStatus != null
+      ? String(a.interviewCompletionStatus)
+      : "not_started";
+  const rs =
+    a.reattemptRequestStatus != null
+      ? String(a.reattemptRequestStatus)
+      : "none";
+  const aiPayload =
+    a.analysis && typeof a.analysis === "object"
+      ? {
+          summary: a.analysis.summary || "",
+          tech: a.analysis.tech ?? 0,
+          comm: a.analysis.comm ?? 0,
+          rec: a.analysis.rec || "",
+          strengths: a.analysis.strengths || [],
+          areas: a.analysis.areas || [],
+        }
+      : null;
+  return {
+    ic,
+    rs,
+    aiPayload,
+    appliedAt: new Date(a.appliedAt),
+    interviewScheduledAt: a.interviewScheduledAt
+      ? new Date(a.interviewScheduledAt)
+      : null,
+    interviewCompletedAt: a.interviewCompletedAt
+      ? new Date(a.interviewCompletedAt)
+      : null,
+  };
+}
+
+async function bumpApplicationIdSequence(client) {
+  try {
+    await client.query(`
+      SELECT setval(
+        pg_get_serial_sequence('application', 'id'),
+        GREATEST(COALESCE((SELECT MAX(id) FROM application), 1), 1)
+      )
+    `);
+  } catch (_e) {
+    /* sequence may not exist in older schemas */
+  }
+}
+
+async function insertApplicationRow(client, candidateId, a, explicitId) {
+  const f = applicationFieldValues(a);
+  const cols = explicitId != null ? "id, " : "";
+  const idPlaceholder = explicitId != null ? "$1, " : "";
+  const baseOffset = explicitId != null ? 1 : 0;
+  const params = [
+    ...(explicitId != null ? [explicitId] : []),
+    candidateId,
+    a.jobId,
+    f.appliedAt,
+    f.interviewScheduledAt,
+    f.interviewCompletedAt,
+    f.ic,
+    f.rs,
+    a.reattemptCandidateReasonCode || null,
+    a.reattemptCandidateReasonText || null,
+    a.reattemptHrReasonCode || null,
+    a.reattemptHrNotes || null,
+    a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+    a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+    a.reattemptResolvedByHrId || null,
+    a.hrRemarks != null ? String(a.hrRemarks) : null,
+    a.hrDecisionStatus || null,
+    f.aiPayload,
+  ];
+  const ph = (n) => `$${n + baseOffset}`;
+  try {
+    const ins = await client.query(
+      `INSERT INTO application (
+         ${cols}candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+         interview_completion_status, reattempt_request_status,
+         reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+         reattempt_hr_reason_code, reattempt_hr_notes,
+         reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
+         hr_remarks, hr_decision_status, ai_analysis_json
+       ) VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)},${ph(6)},${ph(7)},${ph(8)},${ph(9)},${ph(10)},${ph(11)},${ph(12)},${ph(13)},${ph(14)},${ph(15)},${ph(16)},${ph(17)}) RETURNING id`,
+      params,
+    );
+    return Number(ins.rows[0].id);
+  } catch (e) {
+    if (e.code === "42703") {
+      const slimParams = [
+        ...(explicitId != null ? [explicitId] : []),
+        candidateId,
+        a.jobId,
+        f.appliedAt,
+        f.interviewScheduledAt,
+        f.interviewCompletedAt,
+        f.ic,
+        f.rs,
+        a.reattemptCandidateReasonCode || null,
+        a.reattemptCandidateReasonText || null,
+        a.reattemptHrReasonCode || null,
+        a.reattemptHrNotes || null,
+        a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+        a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+        a.reattemptResolvedByHrId || null,
+      ];
+      try {
+        const ins = await client.query(
+          `INSERT INTO application (
+             ${cols}candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
+             interview_completion_status, reattempt_request_status,
+             reattempt_candidate_reason_code, reattempt_candidate_reason_text,
+             reattempt_hr_reason_code, reattempt_hr_notes,
+             reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
+           ) VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)},${ph(6)},${ph(7)},${ph(8)},${ph(9)},${ph(10)},${ph(11)},${ph(12)},${ph(13)},${ph(14)}) RETURNING id`,
+          slimParams,
+        );
+        return Number(ins.rows[0].id);
+      } catch (e2) {
+        if (e2.code === "42703") {
+          const minParams = [
+            ...(explicitId != null ? [explicitId] : []),
+            candidateId,
+            a.jobId,
+            f.appliedAt,
+            f.interviewScheduledAt,
+            f.interviewCompletedAt,
+          ];
+          const ins = await client.query(
+            `INSERT INTO application (${cols}candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at)
+             VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)}) RETURNING id`,
+            minParams,
+          );
+          return Number(ins.rows[0].id);
+        }
+        throw e2;
+      }
+    }
+    throw e;
+  }
+}
+
+async function updateApplicationRow(client, applicationId, candidateId, a) {
+  const f = applicationFieldValues(a);
+  try {
+    await client.query(
+      `UPDATE application SET
+         job_id = $3, applied_at = $4, interview_scheduled_at = $5, interview_completed_at = $6,
+         interview_completion_status = $7, reattempt_request_status = $8,
+         reattempt_candidate_reason_code = $9, reattempt_candidate_reason_text = $10,
+         reattempt_hr_reason_code = $11, reattempt_hr_notes = $12,
+         reattempt_requested_at = $13, reattempt_resolved_at = $14, reattempt_resolved_by_hr_id = $15,
+         hr_remarks = $16, hr_decision_status = $17, ai_analysis_json = $18
+       WHERE id = $1 AND candidate_id = $2`,
+      [
+        applicationId,
+        candidateId,
+        a.jobId,
+        f.appliedAt,
+        f.interviewScheduledAt,
+        f.interviewCompletedAt,
+        f.ic,
+        f.rs,
+        a.reattemptCandidateReasonCode || null,
+        a.reattemptCandidateReasonText || null,
+        a.reattemptHrReasonCode || null,
+        a.reattemptHrNotes || null,
+        a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+        a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+        a.reattemptResolvedByHrId || null,
+        a.hrRemarks != null ? String(a.hrRemarks) : null,
+        a.hrDecisionStatus || null,
+        f.aiPayload,
+      ],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      await client.query(
+        `UPDATE application SET
+           job_id = $3, applied_at = $4, interview_scheduled_at = $5, interview_completed_at = $6,
+           interview_completion_status = $7, reattempt_request_status = $8,
+           reattempt_candidate_reason_code = $9, reattempt_candidate_reason_text = $10,
+           reattempt_hr_reason_code = $11, reattempt_hr_notes = $12,
+           reattempt_requested_at = $13, reattempt_resolved_at = $14, reattempt_resolved_by_hr_id = $15
+         WHERE id = $1 AND candidate_id = $2`,
+        [
+          applicationId,
+          candidateId,
+          a.jobId,
+          f.appliedAt,
+          f.interviewScheduledAt,
+          f.interviewCompletedAt,
+          f.ic,
+          f.rs,
+          a.reattemptCandidateReasonCode || null,
+          a.reattemptCandidateReasonText || null,
+          a.reattemptHrReasonCode || null,
+          a.reattemptHrNotes || null,
+          a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
+          a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
+          a.reattemptResolvedByHrId || null,
+        ],
+      );
+    } else throw e;
+  }
+  return applicationId;
+}
+
+async function upsertApplicationRow(client, candidateId, a) {
+  const explicitId = parseExplicitApplicationId(a);
+  if (explicitId != null) {
+    const ex = await client.query(
+      "SELECT id FROM application WHERE id = $1 AND candidate_id = $2",
+      [explicitId, candidateId],
+    );
+    if (ex.rows.length > 0) {
+      return updateApplicationRow(client, explicitId, candidateId, a);
+    }
+    return insertApplicationRow(client, candidateId, a, explicitId);
+  }
+  return insertApplicationRow(client, candidateId, a, null);
+}
+
+async function writeTranscriptLines(client, candidateId, applicationId, lines) {
+  if (!lines || lines.length === 0) return;
+  try {
+    await client.query(
+      "DELETE FROM transcript_line WHERE candidate_id = $1 AND application_id = $2",
+      [candidateId, applicationId],
+    );
+  } catch (e) {
+    if (e.code !== "42703") throw e;
+  }
+  let idx = 0;
+  for (const line of lines) {
+    const role = line.role === "ai" ? "ai" : "user";
+    const text = line.text || "";
+    try {
+      await client.query(
+        `INSERT INTO transcript_line (candidate_id, application_id, line_index, role, content)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [candidateId, applicationId, idx, role, text],
+      );
+    } catch (e) {
+      if (e.code === "42703") {
+        await client.query(
+          `INSERT INTO transcript_line (candidate_id, line_index, role, content)
+           VALUES ($1,$2,$3,$4)`,
+          [candidateId, idx, role, text],
+        );
+      } else throw e;
+    }
+    idx += 1;
+  }
+}
+
+function mergeApplicationHistory(dbHist, hrHist) {
+  const db = dbHist || [];
+  const hr = hrHist || [];
+  if (hr.length === 0 && db.length > 0) return db;
+  if (db.length === 0) return hr;
+  const byId = new Map();
+  for (const a of db) {
+    const id = parseExplicitApplicationId(a);
+    if (id != null) byId.set(id, { ...a, applicationId: id });
+  }
+  for (const a of hr) {
+    const id = parseExplicitApplicationId(a);
+    if (id != null) {
+      const prev = byId.get(id);
+      byId.set(id, prev ? { ...prev, ...a, applicationId: id } : { ...a, applicationId: id });
+    }
+  }
+  for (const a of db) {
+    const id = parseExplicitApplicationId(a);
+    if (id != null && !hr.some((h) => parseExplicitApplicationId(h) === id)) {
+      if (!byId.has(id)) byId.set(id, { ...a, applicationId: id });
+    }
+  }
+  for (const a of hr) {
+    if (parseExplicitApplicationId(a) == null) {
+      byId.set(`new-${a.jobId}-${a.appliedAt}`, a);
+    }
+  }
+  return [...byId.values()].sort(
+    (x, y) => new Date(x.appliedAt) - new Date(y.appliedAt),
+  );
+}
+
+function mergeCandidatesForHrSave(dbCandidates, hrCandidates) {
+  const dbById = new Map((dbCandidates || []).map((c) => [c.id, c]));
+  const hrById = new Map((hrCandidates || []).map((c) => [c.id, c]));
+  const allIds = new Set([...dbById.keys(), ...hrById.keys()]);
+  const out = [];
+  for (const id of allIds) {
+    const db = dbById.get(id);
+    const hr = hrById.get(id);
+    if (!hr) {
+      if (db) out.push(db);
+      continue;
+    }
+    if (!db) {
+      out.push(hr);
+      continue;
+    }
+    const merged = { ...hr };
+    merged.applicationHistory = mergeApplicationHistory(
+      db.applicationHistory,
+      hr.applicationHistory,
+    );
+    if (!hr.cvFile && db.cvFile) merged.cvFile = db.cvFile;
+    if (!hr.cv && db.cv) merged.cv = db.cv;
+    out.push(merged);
+  }
+  return out;
 }
 
 function parseApplicationAiAnalysis(jsonVal) {
@@ -228,10 +549,20 @@ async function loadOneCandidate(client, id) {
     "SELECT phrase FROM analysis_improvement_area WHERE candidate_id = $1 ORDER BY sort_order, id",
     [id],
   );
-  const cv = await client.query(
-    "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM cv_attachment WHERE candidate_id = $1 LIMIT 1",
-    [id],
-  );
+  let cv;
+  try {
+    cv = await client.query(
+      `SELECT ${CV_SELECT_WITH_S3} FROM cv_attachment WHERE candidate_id = $1 LIMIT 1`,
+      [id],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      cv = await client.query(
+        "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM cv_attachment WHERE candidate_id = $1 LIMIT 1",
+        [id],
+      );
+    } else throw e;
+  }
 
   let analysisObj = null;
   if (analysis.rows.length > 0) {
@@ -248,15 +579,8 @@ async function loadOneCandidate(client, id) {
 
   let cvFile = null;
   if (cv.rows.length > 0) {
-    const f = cv.rows[0];
-    cvFile = {
-      name: f.file_name || "resume",
-      mime: f.mime_type || "",
-      ext: (f.file_ext || "").toLowerCase(),
-      size: Number(f.size_bytes || 0),
-      dataUrl: dataUrlFromRow(f),
-      cvText: b.cv_text || "",
-    };
+    cvFile = await cvFileFromDbRow(cv.rows[0]);
+    if (cvFile) cvFile.cvText = b.cv_text || "";
   }
 
   const hasAppIdCol =
@@ -396,24 +720,26 @@ async function loadTalentPool(client) {
       "SELECT skill_name FROM talent_pool_skill WHERE talent_pool_id = $1 ORDER BY skill_name",
       [e.id],
     );
-    const cvf = await client.query(
-      "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM talent_pool_cv_file WHERE talent_pool_id = $1",
-      [e.id],
-    );
+    let cvf;
+    try {
+      cvf = await client.query(
+        `SELECT ${CV_SELECT_WITH_S3} FROM talent_pool_cv_file WHERE talent_pool_id = $1`,
+        [e.id],
+      );
+    } catch (err) {
+      if (err.code === "42703") {
+        cvf = await client.query(
+          "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM talent_pool_cv_file WHERE talent_pool_id = $1",
+          [e.id],
+        );
+      } else throw err;
+    }
     const maps = await client.query(
       "SELECT job_id, mapped_at, mapped_by_hr_id FROM talent_pool_job_mapping WHERE talent_pool_id = $1 ORDER BY mapped_at",
       [e.id],
     );
     const cvRow = cvf.rows[0];
-    const cvFile = cvRow
-      ? {
-          name: cvRow.file_name || "resume",
-          mime: cvRow.mime_type || "",
-          ext: (cvRow.file_ext || "").toLowerCase(),
-          size: Number(cvRow.size_bytes || 0),
-          dataUrl: dataUrlFromRow(cvRow),
-        }
-      : null;
+    const cvFile = cvRow ? await cvFileFromDbRow(cvRow) : null;
     out.push({
       id: e.id,
       candidateId: e.linked_candidate_id,
@@ -473,6 +799,237 @@ async function loadAudit(client) {
   }));
 }
 
+async function persistCandidateCv(client, candidateId, cvFile, existingS3Key) {
+  if (!cvFile) return;
+  const hasContent =
+    cvFile.dataUrl || cvFile.s3Key || existingS3Key;
+  if (!hasContent) return;
+  let resolved;
+  try {
+    resolved = await resolveCvUpload(
+      "candidates",
+      candidateId,
+      cvFile,
+      existingS3Key,
+    );
+    if (resolved.oldKeyToDelete) {
+      await deleteAttachment(resolved.oldKeyToDelete);
+    }
+  } catch (e) {
+    throw wrapS3Error(e);
+  }
+  await insertCvAttachmentRow(
+    client,
+    "cv_attachment",
+    "candidate_id",
+    candidateId,
+    cvFile,
+    resolved,
+  );
+}
+
+async function persistTalentPoolCv(client, talentPoolId, cvFile, existingS3Key) {
+  if (!cvFile) return;
+  const hasContent =
+    cvFile.dataUrl || cvFile.s3Key || existingS3Key;
+  if (!hasContent) return;
+  let resolved;
+  try {
+    resolved = await resolveCvUpload(
+      "talent-pool",
+      talentPoolId,
+      cvFile,
+      existingS3Key,
+    );
+    if (resolved.oldKeyToDelete) {
+      await deleteAttachment(resolved.oldKeyToDelete);
+    }
+  } catch (e) {
+    throw wrapS3Error(e);
+  }
+  await insertCvAttachmentRow(
+    client,
+    "talent_pool_cv_file",
+    "talent_pool_id",
+    talentPoolId,
+    cvFile,
+    resolved,
+  );
+}
+
+async function clearCandidateSubtree(client, candidateId) {
+  await client.query(
+    "DELETE FROM transcript_line WHERE candidate_id = $1",
+    [candidateId],
+  );
+  try {
+    await client.query(
+      `DELETE FROM interview_answers
+       WHERE application_id IN (SELECT id FROM application WHERE candidate_id = $1)`,
+      [candidateId],
+    );
+  } catch (e) {
+    if (e.code !== "42P01" && e.code !== "42703") throw e;
+  }
+  await client.query(
+    "DELETE FROM application WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM candidate_purpose WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM grievance WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM analysis_strength WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM analysis_improvement_area WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM candidate_analysis WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query(
+    "DELETE FROM cv_attachment WHERE candidate_id = $1",
+    [candidateId],
+  );
+  await client.query("DELETE FROM candidate WHERE id = $1", [candidateId]);
+}
+
+async function insertCandidateFull(client, c, passMap, { existingS3Key } = {}) {
+  let hash = passMap.get(c.id);
+  if (c.password && String(c.password).trim() !== "") {
+    if (looksLikeBcrypt(c.password)) hash = c.password;
+    else hash = await bcrypt.hash(String(c.password), 10);
+  }
+  if (!hash) {
+    hash = await bcrypt.hash(`swar-temp-${c.id}-${Date.now()}`, 10);
+  }
+
+  await client.query(
+    `INSERT INTO candidate (id, name, email, password_hash, status, job_id, cv_text, remarks,
+      interview_language, consent, consent_at, from_talent_pool, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())`,
+    [
+      c.id,
+      c.name,
+      c.email,
+      hash,
+      c.status,
+      c.jobId || null,
+      c.cv || "",
+      c.remarks || "",
+      c.lang || null,
+      !!c.consent,
+      c.consentAt ? new Date(c.consentAt) : null,
+      !!c.fromTalentPool,
+    ],
+  );
+
+  for (const p of c.purposes || []) {
+    await client.query(
+      "INSERT INTO candidate_purpose (candidate_id, purpose_code) VALUES ($1,$2)",
+      [c.id, p],
+    );
+  }
+  const insertedApps = [];
+  for (const a of c.applicationHistory || []) {
+    const dbId = await upsertApplicationRow(client, c.id, a);
+    insertedApps.push({
+      dbId,
+      jobId: a.jobId,
+      appliedAt: a.appliedAt,
+      transcript: a.transcript,
+    });
+  }
+  await bumpApplicationIdSequence(client);
+
+  const anyPerAppTranscript = insertedApps.some(
+    (x) => x.transcript && x.transcript.length > 0,
+  );
+  const legacyTarget =
+    c.transcript &&
+    c.transcript.length > 0 &&
+    !anyPerAppTranscript &&
+    c.jobId &&
+    getLatestAppForJob(insertedApps, c.jobId);
+  const legacyDbId = legacyTarget ? legacyTarget.dbId : null;
+
+  for (const row of insertedApps) {
+    const lines =
+      row.transcript && row.transcript.length > 0
+        ? row.transcript
+        : legacyDbId != null && row.dbId === legacyDbId
+          ? c.transcript
+          : null;
+    if (!lines || lines.length === 0) continue;
+    let idx = 0;
+    for (const line of lines) {
+      const role = line.role === "ai" ? "ai" : "user";
+      const text = line.text || "";
+      try {
+        await client.query(
+          `INSERT INTO transcript_line (candidate_id, application_id, line_index, role, content)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [c.id, row.dbId, idx, role, text],
+        );
+      } catch (e) {
+        if (e.code === "42703") {
+          await client.query(
+            `INSERT INTO transcript_line (candidate_id, line_index, role, content)
+             VALUES ($1,$2,$3,$4)`,
+            [c.id, idx, role, text],
+          );
+        } else throw e;
+      }
+      idx += 1;
+    }
+  }
+  for (const g of c.grievances || []) {
+    const bodyText = typeof g === "string" ? g : g.body || "";
+    if (bodyText)
+      await client.query(
+        "INSERT INTO grievance (candidate_id, body) VALUES ($1,$2)",
+        [c.id, bodyText],
+      );
+  }
+  if (c.analysis) {
+    const a = c.analysis;
+    await client.query(
+      `INSERT INTO candidate_analysis (candidate_id, summary, tech_score, comm_score, recommendation_label)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [
+        c.id,
+        a.summary || "",
+        a.tech ?? 0,
+        a.comm ?? 0,
+        a.rec || "",
+      ],
+    );
+    let o = 0;
+    for (const s of a.strengths || []) {
+      await client.query(
+        "INSERT INTO analysis_strength (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
+        [c.id, o++, String(s)],
+      );
+    }
+    o = 0;
+    for (const ar of a.areas || []) {
+      await client.query(
+        "INSERT INTO analysis_improvement_area (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
+        [c.id, o++, String(ar)],
+      );
+    }
+  }
+  await persistCandidateCv(client, c.id, c.cvFile, existingS3Key);
+}
+
 async function loadAppState(pool) {
   const client = await pool.connect();
   try {
@@ -487,362 +1044,207 @@ async function loadAppState(pool) {
   }
 }
 
-async function saveAppState(pool, body) {
-  const jobs = body.jobs || [];
-  const candidates = body.candidates || [];
-  const talentPool = body.talentPool || [];
-  const auditLog = body.auditLog || [];
-
+/** HR bootstrap: jobs, talent pool, audit — candidates via paginated /api/candidates. */
+async function loadAppStateForHr(pool) {
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
+    const meta = await loadMeta(client);
+    const jobs = await loadJobs(client);
+    const talentPool = await loadTalentPool(client);
+    const auditLog = await loadAudit(client);
+    return { jobs, candidates: [], talentPool, auditLog, meta };
+  } finally {
+    client.release();
+  }
+}
 
-    const prev = await client.query(
-      "SELECT id, password_hash FROM candidate",
+function isProductionEnv() {
+  return process.env.NODE_ENV === "production";
+}
+
+function isPgDeadlock(err) {
+  return Boolean(err && err.code === "40P01");
+}
+
+function saveRetryDelayMs(attempt) {
+  const base = 50 * 2 ** (attempt - 1);
+  return base + Math.floor(Math.random() * 40);
+}
+
+async function loadTalentCvKeys(client) {
+  const talentCvKeys = new Map();
+  try {
+    const tpKeys = await client.query(
+      "SELECT talent_pool_id, s3_key FROM talent_pool_cv_file WHERE s3_key IS NOT NULL",
     );
-    const passMap = new Map(
-      prev.rows.map((r) => [r.id, r.password_hash]),
+    for (const row of tpKeys.rows) {
+      talentCvKeys.set(row.talent_pool_id, row.s3_key);
+    }
+  } catch (_e) {
+    /* s3_key column may be missing until migration */
+  }
+  return talentCvKeys;
+}
+
+/** Candidate ids that exist in DB (batch). Stale talent-pool links are stored as NULL. */
+async function loadExistingCandidateIds(client, ids) {
+  const uniq = [
+    ...new Set(
+      (ids || [])
+        .map((id) => (id != null ? String(id).trim() : ""))
+        .filter(Boolean),
+    ),
+  ];
+  if (uniq.length === 0) return new Set();
+  const r = await client.query(
+    "SELECT id FROM candidate WHERE id = ANY($1::text[])",
+    [uniq],
+  );
+  return new Set(r.rows.map((row) => row.id));
+}
+
+function resolveLinkedCandidateId(candidateId, validIds) {
+  const raw = candidateId != null ? String(candidateId).trim() : "";
+  if (!raw) return null;
+  return validIds.has(raw) ? raw : null;
+}
+
+async function writeJobsFromClient(client, jobs) {
+  for (const j of jobs) {
+    await client.query(
+      `INSERT INTO job (id, title, designation, location, description, requirements)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (id) DO UPDATE SET
+         title = EXCLUDED.title,
+         designation = EXCLUDED.designation,
+         location = EXCLUDED.location,
+         description = EXCLUDED.description,
+         requirements = EXCLUDED.requirements`,
+      [
+        j.id,
+        j.title,
+        j.designation || "",
+        j.location || "",
+        j.description || "",
+        j.requirements || "",
+      ],
     );
-
-    await client.query(`
-      TRUNCATE TABLE
-        audit_event,
-        talent_pool_job_mapping,
-        talent_pool_skill,
-        talent_pool_desired_role,
-        talent_pool_cv_file,
-        talent_pool_entry,
-        transcript_line,
-        interview_answers,
-        application_stage_history,
-        application,
-        candidate_purpose,
-        grievance,
-        candidate_analysis,
-        analysis_strength,
-        analysis_improvement_area,
-        cv_attachment,
-        candidate,
-        job_interview_questions,
-        job
-      RESTART IDENTITY CASCADE
-    `);
-
-    for (const j of jobs) {
-      await client.query(
-        `INSERT INTO job (id, title, designation, location, description, requirements)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          j.id,
-          j.title,
-          j.designation || "",
-          j.location || "",
-          j.description || "",
-          j.requirements || "",
-        ],
-      );
-      const rows = normalizeInterviewQuestionsForSave(j.interviewQuestions || []);
-      for (const q of rows) {
-        try {
-          await client.query(
-            `INSERT INTO job_interview_questions (job_id, question, question_type, question_phase, display_order)
-             VALUES ($1,$2,$3,$4,$5)`,
-            [j.id, q.text, q.type, q.phase, q.ord],
-          );
-        } catch (e) {
-          if (e.code === "42703") {
-            await client.query(
-              `INSERT INTO job_interview_questions (job_id, question, question_type, display_order)
-               VALUES ($1,$2,$3,$4)`,
-              [j.id, q.text, q.type, q.ord],
-            );
-          } else {
-            throw e;
-          }
-        }
-      }
-    }
-
-    for (const c of candidates) {
-      let hash = passMap.get(c.id);
-      if (c.password && String(c.password).trim() !== "") {
-        if (looksLikeBcrypt(c.password)) hash = c.password;
-        else hash = await bcrypt.hash(String(c.password), 10);
-      }
-      if (!hash) {
-        hash = await bcrypt.hash(`swar-temp-${c.id}-${Date.now()}`, 10);
-      }
-
-      await client.query(
-        `INSERT INTO candidate (id, name, email, password_hash, status, job_id, cv_text, remarks,
-          interview_language, consent, consent_at, from_talent_pool, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())`,
-        [
-          c.id,
-          c.name,
-          c.email,
-          hash,
-          c.status,
-          c.jobId || null,
-          c.cv || "",
-          c.remarks || "",
-          c.lang || null,
-          !!c.consent,
-          c.consentAt ? new Date(c.consentAt) : null,
-          !!c.fromTalentPool,
-        ],
-      );
-
-      for (const p of c.purposes || []) {
-        await client.query(
-          "INSERT INTO candidate_purpose (candidate_id, purpose_code) VALUES ($1,$2)",
-          [c.id, p],
-        );
-      }
-      const insertedApps = [];
-      for (const a of c.applicationHistory || []) {
-        const ic =
-          a.interviewCompletionStatus != null
-            ? String(a.interviewCompletionStatus)
-            : "not_started";
-        const rs =
-          a.reattemptRequestStatus != null
-            ? String(a.reattemptRequestStatus)
-            : "none";
-        let ins;
-        const aiPayload =
-          a.analysis && typeof a.analysis === "object"
-            ? {
-                summary: a.analysis.summary || "",
-                tech: a.analysis.tech ?? 0,
-                comm: a.analysis.comm ?? 0,
-                rec: a.analysis.rec || "",
-                strengths: a.analysis.strengths || [],
-                areas: a.analysis.areas || [],
-              }
-            : null;
-        try {
-          ins = await client.query(
-            `INSERT INTO application (
-               candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
-               interview_completion_status, reattempt_request_status,
-               reattempt_candidate_reason_code, reattempt_candidate_reason_text,
-               reattempt_hr_reason_code, reattempt_hr_notes,
-               reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
-               hr_remarks, hr_decision_status, ai_analysis_json
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
-            [
-              c.id,
-              a.jobId,
-              new Date(a.appliedAt),
-              a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
-              a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
-              ic,
-              rs,
-              a.reattemptCandidateReasonCode || null,
-              a.reattemptCandidateReasonText || null,
-              a.reattemptHrReasonCode || null,
-              a.reattemptHrNotes || null,
-              a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
-              a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
-              a.reattemptResolvedByHrId || null,
-              a.hrRemarks != null ? String(a.hrRemarks) : null,
-              a.hrDecisionStatus || null,
-              aiPayload,
-            ],
-          );
-        } catch (e) {
-          if (e.code === "42703") {
-            try {
-              ins = await client.query(
-                `INSERT INTO application (
-                   candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at,
-                   interview_completion_status, reattempt_request_status,
-                   reattempt_candidate_reason_code, reattempt_candidate_reason_text,
-                   reattempt_hr_reason_code, reattempt_hr_notes,
-                   reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id
-                 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
-                [
-                  c.id,
-                  a.jobId,
-                  new Date(a.appliedAt),
-                  a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
-                  a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
-                  ic,
-                  rs,
-                  a.reattemptCandidateReasonCode || null,
-                  a.reattemptCandidateReasonText || null,
-                  a.reattemptHrReasonCode || null,
-                  a.reattemptHrNotes || null,
-                  a.reattemptRequestedAt ? new Date(a.reattemptRequestedAt) : null,
-                  a.reattemptResolvedAt ? new Date(a.reattemptResolvedAt) : null,
-                  a.reattemptResolvedByHrId || null,
-                ],
-              );
-            } catch (e2) {
-              if (e2.code === "42703") {
-                ins = await client.query(
-                  `INSERT INTO application (candidate_id, job_id, applied_at, interview_scheduled_at, interview_completed_at)
-                   VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-                  [
-                    c.id,
-                    a.jobId,
-                    new Date(a.appliedAt),
-                    a.interviewScheduledAt ? new Date(a.interviewScheduledAt) : null,
-                    a.interviewCompletedAt ? new Date(a.interviewCompletedAt) : null,
-                  ],
-                );
-              } else throw e2;
-            }
-          } else throw e;
-        }
-        insertedApps.push({
-          dbId: Number(ins.rows[0].id),
-          jobId: a.jobId,
-          appliedAt: a.appliedAt,
-          transcript: a.transcript,
-        });
-      }
-
-      const anyPerAppTranscript = insertedApps.some(
-        (x) => x.transcript && x.transcript.length > 0,
-      );
-      const legacyTarget =
-        c.transcript &&
-        c.transcript.length > 0 &&
-        !anyPerAppTranscript &&
-        c.jobId &&
-        getLatestAppForJob(insertedApps, c.jobId);
-      const legacyDbId = legacyTarget ? legacyTarget.dbId : null;
-
-      for (const row of insertedApps) {
-        const lines =
-          row.transcript && row.transcript.length > 0
-            ? row.transcript
-            : legacyDbId != null && row.dbId === legacyDbId
-              ? c.transcript
-              : null;
-        if (!lines || lines.length === 0) continue;
-        let idx = 0;
-        for (const line of lines) {
-          const role = line.role === "ai" ? "ai" : "user";
-          const text = line.text || "";
-          try {
-            await client.query(
-              `INSERT INTO transcript_line (candidate_id, application_id, line_index, role, content)
-               VALUES ($1,$2,$3,$4,$5)`,
-              [c.id, row.dbId, idx, role, text],
-            );
-          } catch (e) {
-            if (e.code === "42703") {
-              await client.query(
-                `INSERT INTO transcript_line (candidate_id, line_index, role, content)
-                 VALUES ($1,$2,$3,$4)`,
-                [c.id, idx, role, text],
-              );
-            } else throw e;
-          }
-          idx += 1;
-        }
-      }
-      for (const g of c.grievances || []) {
-        const bodyText = typeof g === "string" ? g : g.body || "";
-        if (bodyText)
-          await client.query(
-            "INSERT INTO grievance (candidate_id, body) VALUES ($1,$2)",
-            [c.id, bodyText],
-          );
-      }
-      if (c.analysis) {
-        const a = c.analysis;
-        await client.query(
-          `INSERT INTO candidate_analysis (candidate_id, summary, tech_score, comm_score, recommendation_label)
-           VALUES ($1,$2,$3,$4,$5)`,
-          [
-            c.id,
-            a.summary || "",
-            a.tech ?? 0,
-            a.comm ?? 0,
-            a.rec || "",
-          ],
-        );
-        let o = 0;
-        for (const s of a.strengths || []) {
-          await client.query(
-            "INSERT INTO analysis_strength (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
-            [c.id, o++, String(s)],
-          );
-        }
-        o = 0;
-        for (const ar of a.areas || []) {
-          await client.query(
-            "INSERT INTO analysis_improvement_area (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
-            [c.id, o++, String(ar)],
-          );
-        }
-      }
-      if (c.cvFile && c.cvFile.dataUrl) {
-        await client.query(
-          `INSERT INTO cv_attachment (candidate_id, file_name, mime_type, file_ext, size_bytes, file_data_base64)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [
-            c.id,
-            c.cvFile.name || "file",
-            c.cvFile.mime || "",
-            (c.cvFile.ext || "").replace(/^\./, ""),
-            c.cvFile.size || 0,
-            stripBase64Prefix(c.cvFile.dataUrl),
-          ],
-        );
-      }
-    }
-
-    for (const t of talentPool) {
-      const appDate =
-        t.applicationDate != null && String(t.applicationDate).trim() !== ""
-          ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
-          : null;
+    await client.query(
+      "DELETE FROM job_interview_questions WHERE job_id = $1",
+      [j.id],
+    );
+    const rows = normalizeInterviewQuestionsForSave(j.interviewQuestions || []);
+    for (const q of rows) {
       try {
         await client.query(
-          `INSERT INTO talent_pool_entry (
-             id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-             qualification, current_ctc, current_employer, source, application_date, cooling_period,
-             preferred_city_1, preferred_city_2, preferred_city_3
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
-          [
-            t.id,
-            t.candidateId || null,
-            t.name,
-            t.email,
-            t.phone || "",
-            t.experience ?? 0,
-            t.location || "",
-            t.keywords || "",
-            t.cvText || "",
-            new Date(t.submittedAt),
-            true,
-            t.qualification != null ? String(t.qualification).slice(0, 500) : null,
-            t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
-            t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
-            t.source != null ? String(t.source).slice(0, 128) : null,
-            appDate,
-            t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
-            t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
-            t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
-            t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
-          ],
+          `INSERT INTO job_interview_questions (job_id, question, question_type, question_phase, display_order)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [j.id, q.text, q.type, q.phase, q.ord],
         );
       } catch (e) {
         if (e.code === "42703") {
-          try {
+          await client.query(
+            `INSERT INTO job_interview_questions (job_id, question, question_type, display_order)
+             VALUES ($1,$2,$3,$4)`,
+            [j.id, q.text, q.type, q.ord],
+          );
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
+}
+
+/** Remove jobs (and their interview questions) not present in the HR client payload. */
+async function pruneJobsNotInClient(client, jobs) {
+  const ids = jobs.map((j) => j.id).filter(Boolean);
+  if (ids.length === 0) return;
+  await client.query(
+    "DELETE FROM job_interview_questions WHERE NOT (job_id = ANY($1::text[]))",
+    [ids],
+  );
+  await client.query("DELETE FROM job WHERE NOT (id = ANY($1::text[]))", [ids]);
+}
+
+async function writeTalentPoolFromClient(client, talentPool, talentCvKeys) {
+  const validCandidateIds = await loadExistingCandidateIds(
+    client,
+    talentPool.map((t) => t.candidateId),
+  );
+
+  for (const t of talentPool) {
+    const linkedId = resolveLinkedCandidateId(t.candidateId, validCandidateIds);
+    const appDate =
+      t.applicationDate != null && String(t.applicationDate).trim() !== ""
+        ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
+        : null;
+    try {
+      await client.query(
+        `INSERT INTO talent_pool_entry (
+           id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+           qualification, current_ctc, current_employer, source, application_date, cooling_period,
+           preferred_city_1, preferred_city_2, preferred_city_3
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+        [
+          t.id,
+          linkedId,
+          t.name,
+          t.email,
+          t.phone || "",
+          t.experience ?? 0,
+          t.location || "",
+          t.keywords || "",
+          t.cvText || "",
+          new Date(t.submittedAt),
+          true,
+          t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+          t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+          t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+          t.source != null ? String(t.source).slice(0, 128) : null,
+          appDate,
+          t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+          t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
+          t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
+          t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
+        ],
+      );
+    } catch (e) {
+      if (e.code === "42703") {
+        try {
+          await client.query(
+            `INSERT INTO talent_pool_entry (
+               id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+               qualification, current_ctc, current_employer, source, application_date, cooling_period
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+            [
+              t.id,
+              linkedId,
+              t.name,
+              t.email,
+              t.phone || "",
+              t.experience ?? 0,
+              t.location || "",
+              t.keywords || "",
+              t.cvText || "",
+              new Date(t.submittedAt),
+              true,
+              t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+              t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+              t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+              t.source != null ? String(t.source).slice(0, 128) : null,
+              appDate,
+              t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+            ],
+          );
+        } catch (e2) {
+          if (e2.code === "42703") {
             await client.query(
-              `INSERT INTO talent_pool_entry (
-                 id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-                 qualification, current_ctc, current_employer, source, application_date, cooling_period
-               ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+              `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
               [
                 t.id,
-                t.candidateId || null,
+                linkedId,
                 t.name,
                 t.email,
                 t.phone || "",
@@ -852,100 +1254,137 @@ async function saveAppState(pool, body) {
                 t.cvText || "",
                 new Date(t.submittedAt),
                 true,
-                t.qualification != null ? String(t.qualification).slice(0, 500) : null,
-                t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
-                t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
-                t.source != null ? String(t.source).slice(0, 128) : null,
-                appDate,
-                t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
               ],
             );
-          } catch (e2) {
-            if (e2.code === "42703") {
-              await client.query(
-                `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-                [
-                  t.id,
-                  t.candidateId || null,
-                  t.name,
-                  t.email,
-                  t.phone || "",
-                  t.experience ?? 0,
-                  t.location || "",
-                  t.keywords || "",
-                  t.cvText || "",
-                  new Date(t.submittedAt),
-                  true,
-                ],
-              );
-            } else throw e2;
-          }
-        } else throw e;
-      }
-      for (const dr of t.desiredRoles || []) {
-        await client.query(
-          "INSERT INTO talent_pool_desired_role (talent_pool_id, role_name) VALUES ($1,$2)",
-          [t.id, dr],
-        );
-      }
-      for (const sk of t.skills || []) {
-        await client.query(
-          "INSERT INTO talent_pool_skill (talent_pool_id, skill_name) VALUES ($1,$2)",
-          [t.id, sk],
-        );
-      }
-      if (t.cvFile && t.cvFile.dataUrl) {
-        await client.query(
-          `INSERT INTO talent_pool_cv_file (talent_pool_id, file_name, mime_type, file_ext, size_bytes, file_data_base64)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
-          [
-            t.id,
-            t.cvFile.name || "file",
-            t.cvFile.mime || "",
-            (t.cvFile.ext || "").replace(/^\./, ""),
-            t.cvFile.size || 0,
-            stripBase64Prefix(t.cvFile.dataUrl),
-          ],
-        );
-      }
-      for (const m of t.mappedToJobs || []) {
-        await client.query(
-          `INSERT INTO talent_pool_job_mapping (talent_pool_id, job_id, mapped_at, mapped_by_hr_id)
-           VALUES ($1,$2,$3,$4)`,
-          [
-            t.id,
-            m.jobId,
-            new Date(m.mappedAt),
-            m.mappedBy || null,
-          ],
-        );
-      }
+          } else throw e2;
+        }
+      } else throw e;
     }
-
-    for (const ev of auditLog) {
+    for (const dr of t.desiredRoles || []) {
       await client.query(
-        `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
-        [
-          ev.id,
-          new Date(ev.timestamp),
-          ev.actor,
-          ev.action,
-          ev.target || null,
-          ev.details || "",
-        ],
+        "INSERT INTO talent_pool_desired_role (talent_pool_id, role_name) VALUES ($1,$2)",
+        [t.id, dr],
       );
     }
+    for (const sk of t.skills || []) {
+      await client.query(
+        "INSERT INTO talent_pool_skill (talent_pool_id, skill_name) VALUES ($1,$2)",
+        [t.id, sk],
+      );
+    }
+    if (t.cvFile) {
+      await persistTalentPoolCv(
+        client,
+        t.id,
+        t.cvFile,
+        talentCvKeys.get(t.id) || null,
+      );
+    }
+    for (const m of t.mappedToJobs || []) {
+      await client.query(
+        `INSERT INTO talent_pool_job_mapping (talent_pool_id, job_id, mapped_at, mapped_by_hr_id)
+         VALUES ($1,$2,$3,$4)`,
+        [t.id, m.jobId, new Date(m.mappedAt), m.mappedBy || null],
+      );
+    }
+  }
+}
+
+async function writeAuditFromClient(client, auditLog) {
+  for (const ev of auditLog) {
+    await client.query(
+      `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [
+        ev.id,
+        new Date(ev.timestamp),
+        ev.actor,
+        ev.action,
+        ev.target || null,
+        ev.details || "",
+      ],
+    );
+  }
+}
+
+/** Persist jobs, talent pool, audit only — never truncates candidate/application data. */
+async function saveHrShellStateOnce(pool, body) {
+  const jobs = body.jobs || [];
+  const talentPool = body.talentPool || [];
+  const auditLog = body.auditLog || [];
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const talentCvKeys = await loadTalentCvKeys(client);
+
+    /* Do NOT TRUNCATE job — CASCADE would wipe candidate/application/transcript tables. */
+    await client.query("TRUNCATE TABLE audit_event RESTART IDENTITY");
+    await client.query(`
+      TRUNCATE TABLE
+        talent_pool_job_mapping,
+        talent_pool_skill,
+        talent_pool_desired_role,
+        talent_pool_cv_file,
+        talent_pool_entry
+      RESTART IDENTITY CASCADE
+    `);
+
+    await writeJobsFromClient(client, jobs);
+    await pruneJobsNotInClient(client, jobs);
+    await writeTalentPoolFromClient(client, talentPool, talentCvKeys);
+    await writeAuditFromClient(client, auditLog);
 
     await client.query("COMMIT");
     return { ok: true };
   } catch (e) {
-    await client.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch (_rb) {
+      /* transaction may already be aborted */
+    }
     throw e;
   } finally {
     client.release();
   }
+}
+
+async function saveAppStateOnce(pool, body) {
+  if (body.saveCandidates !== false) {
+    const err = new Error(
+      "Full state replace is disabled. Send saveCandidates: false and use /api/candidates for candidate updates.",
+    );
+    err.status = 400;
+    throw err;
+  }
+  if (Array.isArray(body.candidates) && body.candidates.length > 0) {
+    const err = new Error(
+      "Candidate data cannot be saved via PUT /api/state. Use PATCH /api/candidates/:id instead.",
+    );
+    err.status = 400;
+    throw err;
+  }
+  return saveHrShellStateOnce(pool, body);
+}
+
+/** Full HR state replace; retries on PostgreSQL deadlock (40P01) when concurrent load/save overlap. */
+async function saveAppState(pool, body) {
+  const maxAttempts = 4;
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await saveAppStateOnce(pool, body);
+    } catch (e) {
+      lastErr = e;
+      if (!isPgDeadlock(e) || attempt >= maxAttempts) throw e;
+      const delay = saveRetryDelayMs(attempt);
+      console.warn(
+        `[saveAppState] deadlock (attempt ${attempt}/${maxAttempts}), retrying in ${delay}ms`,
+      );
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
 }
 
 async function verifyCandidateLogin(pool, email, password) {
@@ -967,20 +1406,31 @@ async function verifyHrLogin(pool, hrId, password) {
   );
   if (r.rows.length === 0) return { ok: false };
   const row = r.rows[0];
-  if (!row.password_hash) return { ok: true, hrId: row.hr_id };
-  if (!password) return { ok: false };
+  if (!row.password_hash || !password) return { ok: false };
   const match = await bcrypt.compare(password, row.password_hash);
   if (!match) return { ok: false };
   return { ok: true, hrId: row.hr_id };
 }
 
-async function updateCandidatePassword(pool, email, newPassword) {
-  const hash = await bcrypt.hash(newPassword, 10);
+/** HR-only: set a new login password for a candidate by id. */
+async function hrResetCandidatePassword(pool, candidateId, newPassword) {
+  const pw = String(newPassword || "");
+  if (pw.length < 6) {
+    const err = new Error("newPassword must be at least 6 characters");
+    err.status = 400;
+    throw err;
+  }
+  const hash = await bcrypt.hash(pw, 10);
   const r = await pool.query(
-    "UPDATE candidate SET password_hash = $1, updated_at = NOW() WHERE lower(email) = lower($2) RETURNING id",
-    [hash, email.trim()],
+    "UPDATE candidate SET password_hash = $1, updated_at = NOW() WHERE id = $2 RETURNING id",
+    [hash, candidateId],
   );
-  return r.rowCount > 0;
+  if (r.rowCount === 0) {
+    const err = new Error("Candidate not found");
+    err.status = 404;
+    throw err;
+  }
+  return { ok: true, candidateId };
 }
 
 function coolingInfo(history, jobId, coolingMonths) {
@@ -1081,6 +1531,7 @@ async function listJobsApi(pool, candidateId) {
 async function getCandidateMe(pool, candidateId) {
   const client = await pool.connect();
   try {
+    await repairCompletedInterviewsForCandidate(client, candidateId);
     return await loadOneCandidate(client, candidateId);
   } finally {
     client.release();
@@ -1150,15 +1601,857 @@ async function deleteJob(pool, jobId) {
   return { ok: true };
 }
 
+async function insertTalentPoolEntry(client, t, existingS3Key) {
+  const validCandidateIds = await loadExistingCandidateIds(client, [
+    t.candidateId,
+  ]);
+  const linkedId = resolveLinkedCandidateId(t.candidateId, validCandidateIds);
+  const appDate =
+    t.applicationDate != null && String(t.applicationDate).trim() !== ""
+      ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
+      : null;
+  const entryId = t.id || `TP-${Date.now()}`;
+  try {
+    await client.query(
+      `INSERT INTO talent_pool_entry (
+         id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+         qualification, current_ctc, current_employer, source, application_date, cooling_period,
+         preferred_city_1, preferred_city_2, preferred_city_3
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+      [
+        entryId,
+        linkedId,
+        t.name,
+        t.email,
+        t.phone || "",
+        t.experience ?? 0,
+        t.location || "",
+        t.keywords || "",
+        t.cvText || "",
+        new Date(t.submittedAt || Date.now()),
+        true,
+        t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+        t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+        t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+        t.source != null ? String(t.source).slice(0, 128) : null,
+        appDate,
+        t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+        t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
+        t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
+        t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
+      ],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      try {
+        await client.query(
+          `INSERT INTO talent_pool_entry (
+             id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+             qualification, current_ctc, current_employer, source, application_date, cooling_period
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+          [
+            entryId,
+            linkedId,
+            t.name,
+            t.email,
+            t.phone || "",
+            t.experience ?? 0,
+            t.location || "",
+            t.keywords || "",
+            t.cvText || "",
+            new Date(t.submittedAt || Date.now()),
+            true,
+            t.qualification != null ? String(t.qualification).slice(0, 500) : null,
+            t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
+            t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
+            t.source != null ? String(t.source).slice(0, 128) : null,
+            appDate,
+            t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
+          ],
+        );
+      } catch (e2) {
+        if (e2.code === "42703") {
+          await client.query(
+            `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            [
+              entryId,
+              linkedId,
+              t.name,
+              t.email,
+              t.phone || "",
+              t.experience ?? 0,
+              t.location || "",
+              t.keywords || "",
+              t.cvText || "",
+              new Date(t.submittedAt || Date.now()),
+              true,
+            ],
+          );
+        } else throw e2;
+      }
+    } else throw e;
+  }
+  for (const dr of t.desiredRoles || []) {
+    await client.query(
+      "INSERT INTO talent_pool_desired_role (talent_pool_id, role_name) VALUES ($1,$2)",
+      [entryId, dr],
+    );
+  }
+  for (const sk of t.skills || []) {
+    await client.query(
+      "INSERT INTO talent_pool_skill (talent_pool_id, skill_name) VALUES ($1,$2)",
+      [entryId, sk],
+    );
+  }
+  if (t.cvFile) {
+    await persistTalentPoolCv(client, entryId, t.cvFile, existingS3Key);
+  }
+  return entryId;
+}
+
+async function submitTalentPoolEntry(pool, entry, { candidateId } = {}) {
+  if (!entry || !entry.name || !entry.email) {
+    const err = new Error("name and email required");
+    err.status = 400;
+    throw err;
+  }
+  const payload = { ...entry };
+  if (candidateId) {
+    if (payload.candidateId && payload.candidateId !== candidateId) {
+      const err = new Error("Forbidden");
+      err.status = 403;
+      throw err;
+    }
+    payload.candidateId = candidateId;
+  }
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const id = await insertTalentPoolEntry(client, payload, null);
+    await client.query("COMMIT");
+    return { ok: true, id };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function fetchCandidateCvS3Key(pool, candidateId) {
+  try {
+    const cvr = await pool.query(
+      "SELECT s3_key FROM cv_attachment WHERE candidate_id = $1",
+      [candidateId],
+    );
+    return cvr.rows[0]?.s3_key || null;
+  } catch (e) {
+    if (e.code === "42703") return null;
+    throw e;
+  }
+}
+
+async function insertNewApplication(client, candidateId, jobId, appliedAt) {
+  const at = appliedAt instanceof Date ? appliedAt : new Date(appliedAt);
+  try {
+    const ins = await client.query(
+      `INSERT INTO application (
+         candidate_id, job_id, applied_at, interview_completion_status, reattempt_request_status
+       ) VALUES ($1,$2,$3,'not_started','none') RETURNING id`,
+      [candidateId, jobId, at],
+    );
+    return Number(ins.rows[0].id);
+  } catch (e) {
+    if (e.code === "42703") {
+      const ins = await client.query(
+        "INSERT INTO application (candidate_id, job_id, applied_at) VALUES ($1,$2,$3) RETURNING id",
+        [candidateId, jobId, at],
+      );
+      return Number(ins.rows[0].id);
+    }
+    throw e;
+  }
+}
+
+async function applyToJob(pool, candidateId, { jobId, cv, cvFile }) {
+  const jid = jobId == null ? "" : String(jobId).trim();
+  if (!jid) {
+    const err = new Error("jobId required");
+    err.status = 400;
+    throw err;
+  }
+  if (!cvFile || (!cvFile.dataUrl && !cvFile.s3Key)) {
+    const err = new Error("cvFile with dataUrl required");
+    err.status = 400;
+    throw err;
+  }
+
+  const existingS3Key = await fetchCandidateCvS3Key(pool, candidateId);
+  const client = await pool.connect();
+  let applicationId;
+  try {
+    await client.query("BEGIN");
+
+    const cand = await client.query(
+      "SELECT id FROM candidate WHERE id = $1",
+      [candidateId],
+    );
+    if (cand.rows.length === 0) {
+      const err = new Error("Not found");
+      err.status = 404;
+      throw err;
+    }
+
+    const job = await client.query("SELECT id FROM job WHERE id = $1", [jid]);
+    if (job.rows.length === 0) {
+      const err = new Error("Job not found");
+      err.status = 404;
+      throw err;
+    }
+
+    const apps = await client.query(
+      `SELECT id, job_id, applied_at, interview_scheduled_at, interview_completed_at
+       FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
+      [candidateId],
+    );
+    const history = apps.rows.map((r) => ({
+      jobId: r.job_id,
+      appliedAt: new Date(r.applied_at).toISOString(),
+      interviewScheduledAt: r.interview_scheduled_at
+        ? new Date(r.interview_scheduled_at).toISOString()
+        : undefined,
+      interviewCompletedAt: r.interview_completed_at
+        ? new Date(r.interview_completed_at).toISOString()
+        : undefined,
+      applicationId: Number(r.id),
+    }));
+
+    const meta = await loadMeta(client);
+    const cooling = coolingInfo(history, jid, meta.coolingMonths ?? 3);
+
+    const pendingForJob = history
+      .filter((a) => a.jobId === jid && !a.interviewCompletedAt)
+      .sort((a, b) => new Date(b.appliedAt) - new Date(a.appliedAt))[0];
+
+    if (pendingForJob) {
+      applicationId = pendingForJob.applicationId;
+    } else if (!cooling.canApply) {
+      const err = new Error(
+        cooling.pendingInterview
+          ? "Interview pending for this role."
+          : `Cooling period active. Re-apply in ${cooling.daysRemaining} days.`,
+      );
+      err.status = 409;
+      err.code = cooling.pendingInterview ? "INTERVIEW_PENDING" : "COOLING_PERIOD";
+      err.daysRemaining = cooling.daysRemaining;
+      err.eligibleAt = cooling.eligibleAt;
+      throw err;
+    } else {
+      applicationId = await insertNewApplication(
+        client,
+        candidateId,
+        jid,
+        new Date(),
+      );
+    }
+
+    await client.query(
+      `UPDATE candidate SET status = 'APPLIED', job_id = $2, cv_text = $3, updated_at = NOW()
+       WHERE id = $1`,
+      [candidateId, jid, cv != null ? String(cv) : ""],
+    );
+
+    await client.query(
+      "DELETE FROM cv_attachment WHERE candidate_id = $1",
+      [candidateId],
+    );
+    await persistCandidateCv(client, candidateId, cvFile, existingS3Key);
+
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+
+  const candidate = await getCandidateMe(pool, candidateId);
+  return { candidate, applicationId };
+}
+
+async function patchCandidateFromClient(client, c, passMap, { existingS3Key } = {}) {
+  const prev = await client.query(
+    "SELECT id, password_hash FROM candidate WHERE id = $1",
+    [c.id],
+  );
+  if (prev.rows.length === 0) {
+    const err = new Error("Not found");
+    err.status = 404;
+    throw err;
+  }
+  const hash = passMap.get(c.id) || prev.rows[0].password_hash;
+
+  await client.query(
+    `UPDATE candidate SET name = $2, email = $3, password_hash = $4, status = $5, job_id = $6,
+       cv_text = $7, remarks = $8, interview_language = $9, consent = $10, consent_at = $11,
+       from_talent_pool = $12, updated_at = NOW()
+     WHERE id = $1`,
+    [
+      c.id,
+      c.name,
+      c.email,
+      hash,
+      c.status,
+      c.jobId || null,
+      c.cv || "",
+      c.remarks || "",
+      c.lang || null,
+      !!c.consent,
+      c.consentAt ? new Date(c.consentAt) : null,
+      !!c.fromTalentPool,
+    ],
+  );
+
+  await client.query("DELETE FROM candidate_purpose WHERE candidate_id = $1", [c.id]);
+  for (const p of c.purposes || []) {
+    await client.query(
+      "INSERT INTO candidate_purpose (candidate_id, purpose_code) VALUES ($1,$2)",
+      [c.id, p],
+    );
+  }
+
+  const clientApps = c.applicationHistory || [];
+  const dbAppCount = await client.query(
+    "SELECT COUNT(*)::int AS n FROM application WHERE candidate_id = $1",
+    [c.id],
+  );
+  const dbHasApps = (dbAppCount.rows[0]?.n ?? 0) > 0;
+
+  const insertedApps = [];
+  if (clientApps.length > 0 || !dbHasApps) {
+    const keptIds = [];
+    for (const a of clientApps) {
+      const dbId = await upsertApplicationRow(client, c.id, a);
+      keptIds.push(dbId);
+      insertedApps.push({
+        dbId,
+        jobId: a.jobId,
+        appliedAt: a.appliedAt,
+        transcript: a.transcript,
+      });
+    }
+    await bumpApplicationIdSequence(client);
+    if (keptIds.length > 0) {
+      await client.query(
+        `DELETE FROM application WHERE candidate_id = $1 AND id <> ALL($2::bigint[])`,
+        [c.id, keptIds],
+      );
+    }
+  }
+
+  const anyPerAppTranscript = insertedApps.some(
+    (x) => x.transcript && x.transcript.length > 0,
+  );
+  const legacyTarget =
+    c.transcript &&
+    c.transcript.length > 0 &&
+    !anyPerAppTranscript &&
+    c.jobId &&
+    getLatestAppForJob(insertedApps, c.jobId);
+  const legacyDbId = legacyTarget ? legacyTarget.dbId : null;
+
+  for (const row of insertedApps) {
+    const lines =
+      row.transcript && row.transcript.length > 0
+        ? row.transcript
+        : legacyDbId != null && row.dbId === legacyDbId
+          ? c.transcript
+          : null;
+    if (lines && lines.length > 0) {
+      await writeTranscriptLines(client, c.id, row.dbId, lines);
+    }
+  }
+
+  await client.query("DELETE FROM grievance WHERE candidate_id = $1", [c.id]);
+  for (const g of c.grievances || []) {
+    const bodyText = typeof g === "string" ? g : g.body || "";
+    if (bodyText) {
+      await client.query(
+        "INSERT INTO grievance (candidate_id, body) VALUES ($1,$2)",
+        [c.id, bodyText],
+      );
+    }
+  }
+
+  await client.query(
+    "DELETE FROM analysis_strength WHERE candidate_id = $1",
+    [c.id],
+  );
+  await client.query(
+    "DELETE FROM analysis_improvement_area WHERE candidate_id = $1",
+    [c.id],
+  );
+  await client.query("DELETE FROM candidate_analysis WHERE candidate_id = $1", [c.id]);
+  if (c.analysis) {
+    const a = c.analysis;
+    await client.query(
+      `INSERT INTO candidate_analysis (candidate_id, summary, tech_score, comm_score, recommendation_label)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [c.id, a.summary || "", a.tech ?? 0, a.comm ?? 0, a.rec || ""],
+    );
+    let o = 0;
+    for (const s of a.strengths || []) {
+      await client.query(
+        "INSERT INTO analysis_strength (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
+        [c.id, o++, String(s)],
+      );
+    }
+    o = 0;
+    for (const ar of a.areas || []) {
+      await client.query(
+        "INSERT INTO analysis_improvement_area (candidate_id, sort_order, phrase) VALUES ($1,$2,$3)",
+        [c.id, o++, String(ar)],
+      );
+    }
+  }
+
+  const cvHasFresh =
+    c.cvFile &&
+    (isFreshDataUrl(c.cvFile.dataUrl) ||
+      (c.cvFile.s3Key && c.cvFile.s3Key !== existingS3Key));
+  if (cvHasFresh) {
+    await client.query("DELETE FROM cv_attachment WHERE candidate_id = $1", [c.id]);
+    await persistCandidateCv(client, c.id, c.cvFile, existingS3Key);
+  }
+}
+
+async function saveOneCandidate(pool, candidateId, candidateData) {
+  if (!candidateData || String(candidateData.id) !== String(candidateId)) {
+    const err = new Error("Forbidden");
+    err.status = 403;
+    throw err;
+  }
+  let existingS3Key = null;
+  try {
+    const cvr = await pool.query(
+      "SELECT s3_key FROM cv_attachment WHERE candidate_id = $1",
+      [candidateId],
+    );
+    existingS3Key = cvr.rows[0]?.s3_key || null;
+  } catch (e) {
+    if (e.code !== "42703") throw e;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const prev = await client.query(
+      "SELECT id, password_hash FROM candidate WHERE id = $1",
+      [candidateId],
+    );
+    if (prev.rows.length === 0) {
+      const err = new Error("Not found");
+      err.status = 404;
+      throw err;
+    }
+    const passMap = new Map([
+      [candidateId, prev.rows[0].password_hash],
+    ]);
+    await patchCandidateFromClient(client, candidateData, passMap, {
+      existingS3Key,
+    });
+    await client.query("COMMIT");
+    return { ok: true };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+function mapListRowToSummary(r) {
+  const appCount = Number(r.application_count || 0);
+  const sched = r.interview_scheduled_at
+    ? new Date(r.interview_scheduled_at).toISOString()
+    : undefined;
+  const hasTranscript = Boolean(r.has_transcript);
+  const hasAnalysis = Boolean(r.has_analysis);
+  const hasVoiceInterview = Boolean(r.has_voice_interview);
+  const ic = r.interview_completion_status || null;
+  const interviewDone =
+    Boolean(r.interview_completed_at) ||
+    hasTranscript ||
+    ic === "completed" ||
+    hasVoiceInterview;
+  const status =
+    interviewDone &&
+    (r.status === "APPLIED" ||
+      r.status === "SHORTLISTED" ||
+      r.status === "REGISTERED" ||
+      r.status === "SCHEDULED")
+      ? "INTERVIEWED"
+      : r.status;
+  return {
+    id: r.id,
+    name: r.name,
+    email: r.email,
+    status,
+    jobId: r.job_id,
+    consent: r.consent,
+    fromTalentPool: r.from_talent_pool,
+    createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
+    updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
+    interviewScheduledAt: sched,
+    applicationCount: appCount,
+    hasTranscript: hasTranscript || (interviewDone && hasVoiceInterview),
+    hasAnalysis,
+    interviewCompletedAt: r.interview_completed_at
+      ? new Date(r.interview_completed_at).toISOString()
+      : undefined,
+    cv: r.cv_text != null ? String(r.cv_text) : undefined,
+    applicationHistory:
+      appCount > 0
+        ? [
+            {
+              jobId: r.job_id,
+              interviewScheduledAt: sched,
+              interviewCompletedAt: r.interview_completed_at
+                ? new Date(r.interview_completed_at).toISOString()
+                : undefined,
+              interviewCompletionStatus:
+                ic === "completed" || interviewDone ? "completed" : "not_started",
+            },
+          ]
+        : [],
+    analysis: hasAnalysis ? { summary: "" } : undefined,
+  };
+}
+
+async function listCandidateStats(pool) {
+  const r = await pool.query(
+    `SELECT status, COUNT(*)::int AS n FROM candidate GROUP BY status`,
+  );
+  const byStatus = {};
+  let total = 0;
+  for (const row of r.rows) {
+    byStatus[row.status] = row.n;
+    total += row.n;
+  }
+  let interviewedExtra = 0;
+  try {
+    const ic = await pool.query(
+      `SELECT COUNT(DISTINCT c.id)::int AS n
+       FROM candidate c
+       INNER JOIN application a ON a.candidate_id = c.id
+       WHERE a.interview_completion_status = 'completed'
+         AND c.status IN ('APPLIED', 'SHORTLISTED', 'REGISTERED', 'SCHEDULED')`,
+    );
+    interviewedExtra = ic.rows[0]?.n ?? 0;
+  } catch (e) {
+    if (e.code !== "42703") throw e;
+  }
+  const interviewed =
+    (byStatus.INTERVIEWED || 0) + interviewedExtra;
+  const applied = Math.max(0, (byStatus.APPLIED || 0) - interviewedExtra);
+  return {
+    total,
+    applied,
+    shortlisted: byStatus.SHORTLISTED || 0,
+    interviewed,
+    rejected: byStatus.REJECTED || 0,
+    registered: byStatus.REGISTERED || 0,
+    byStatus,
+  };
+}
+
+function encodeListCursor(row) {
+  const payload = JSON.stringify({
+    t:
+      row.created_at instanceof Date
+        ? row.created_at.toISOString()
+        : String(row.created_at),
+    id: row.id,
+  });
+  return Buffer.from(payload, "utf8").toString("base64url");
+}
+
+function decodeListCursor(cursor) {
+  if (!cursor || typeof cursor !== "string") return null;
+  try {
+    const o = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    if (!o?.t || !o?.id) return null;
+    return { createdAt: o.t, id: String(o.id) };
+  } catch {
+    return null;
+  }
+}
+
+async function listCandidatesPaginated(
+  pool,
+  { page, limit, cursor, status, search, consentOnly, includeCvText },
+) {
+  const params = [];
+  const where = [];
+
+  if (status) {
+    params.push(status);
+    where.push(`c.status = $${params.length}`);
+  }
+  if (search) {
+    params.push(`%${search.toLowerCase()}%`);
+    where.push(
+      `(lower(c.name) LIKE $${params.length} OR lower(c.email) LIKE $${params.length})`,
+    );
+  }
+  if (consentOnly) {
+    where.push("c.consent = true");
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const cvSelect = includeCvText ? ", c.cv_text" : "";
+
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM candidate c ${whereSql}`,
+    params,
+  );
+  const total = countRes.rows[0]?.total ?? 0;
+
+  const listWhere = [...where];
+  const listParams = [...params];
+  const decoded = decodeListCursor(cursor);
+  if (decoded) {
+    listParams.push(decoded.createdAt, decoded.id);
+    listWhere.push(
+      `(c.created_at, c.id) < ($${listParams.length - 1}::timestamptz, $${listParams.length})`,
+    );
+  }
+  const listWhereSql = listWhere.length ? `WHERE ${listWhere.join(" AND ")}` : "";
+
+  listParams.push(limit + 1);
+  const listRes = await pool.query(
+    `SELECT c.id, c.name, c.email, c.status, c.job_id, c.consent, c.from_talent_pool,
+            c.created_at, c.updated_at${cvSelect},
+            la.interview_scheduled_at,
+            la.interview_completed_at,
+            la.interview_completion_status,
+            (SELECT COUNT(*)::int FROM application a WHERE a.candidate_id = c.id) AS application_count,
+            EXISTS (SELECT 1 FROM transcript_line tl WHERE tl.candidate_id = c.id) AS has_transcript,
+            EXISTS (SELECT 1 FROM candidate_analysis ca WHERE ca.candidate_id = c.id) AS has_analysis,
+            EXISTS (
+              SELECT 1 FROM interview_answers ia
+              INNER JOIN application ax ON ax.id = ia.application_id
+              WHERE ax.candidate_id = c.id
+            ) AS has_voice_interview
+     FROM candidate c
+     LEFT JOIN LATERAL (
+       SELECT a.interview_scheduled_at, a.interview_completed_at,
+              a.interview_completion_status
+       FROM application a
+       WHERE a.candidate_id = c.id
+       ORDER BY a.applied_at DESC NULLS LAST, a.id DESC
+       LIMIT 1
+     ) la ON true
+     ${listWhereSql}
+     ORDER BY c.created_at DESC, c.id DESC
+     LIMIT $${listParams.length}`,
+    listParams,
+  );
+
+  const rows = listRes.rows;
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor =
+    hasMore && pageRows.length > 0
+      ? encodeListCursor(pageRows[pageRows.length - 1])
+      : null;
+
+  const pageNum = Math.max(1, parseInt(String(page || "1"), 10) || 1);
+
+  return {
+    page: pageNum,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    nextCursor,
+    candidates: pageRows.map(mapListRowToSummary),
+  };
+}
+
+async function findCandidateByEmail(pool, email) {
+  const r = await pool.query(
+    "SELECT id FROM candidate WHERE lower(email) = lower($1) LIMIT 1",
+    [String(email || "").trim()],
+  );
+  if (r.rows.length === 0) return null;
+  return r.rows[0].id;
+}
+
+async function patchCandidateForHr(pool, candidateId, candidateData) {
+  await saveOneCandidate(pool, candidateId, candidateData);
+  return getCandidateMe(pool, candidateId);
+}
+
+async function bulkUpdateCandidateStatus(pool, updates) {
+  if (!Array.isArray(updates) || updates.length === 0) return { ok: true, updated: 0 };
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let n = 0;
+    for (const row of updates) {
+      if (!row?.id || !row?.status) continue;
+      const r = await client.query(
+        `UPDATE candidate SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [String(row.status), row.id],
+      );
+      n += r.rowCount || 0;
+    }
+    await client.query("COMMIT");
+    return { ok: true, updated: n };
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
+async function mapTalentPoolToJob(pool, { talentPoolId, jobId, hrId }) {
+  const client = await pool.connect();
+  try {
+    const tp = await client.query(
+      `SELECT id, name, email, cv_text, submitted_at FROM talent_pool_entry WHERE id = $1`,
+      [talentPoolId],
+    );
+    if (tp.rows.length === 0) {
+      const err = new Error("Talent pool entry not found");
+      err.status = 404;
+      throw err;
+    }
+    const entry = tp.rows[0];
+    let cvFile = null;
+    try {
+      const cvf = await client.query(
+        `SELECT ${CV_SELECT_WITH_S3} FROM talent_pool_cv_file WHERE talent_pool_id = $1`,
+        [talentPoolId],
+      );
+      if (cvf.rows[0]) cvFile = await cvFileFromDbRow(cvf.rows[0]);
+    } catch (_e) {
+      /* optional */
+    }
+
+    await client.query("BEGIN");
+
+    const existingId = (
+      await client.query(
+        "SELECT id FROM candidate WHERE lower(email) = lower($1) LIMIT 1",
+        [String(entry.email || "").trim()],
+      )
+    ).rows[0]?.id;
+    const created = !existingId;
+    let candidateId = existingId;
+    const appliedAt = new Date().toISOString();
+    const newApp = {
+      jobId,
+      appliedAt,
+      interviewCompletionStatus: "not_started",
+      reattemptRequestStatus: "none",
+    };
+
+    if (candidateId) {
+      const passRow = await client.query(
+        "SELECT password_hash FROM candidate WHERE id = $1",
+        [candidateId],
+      );
+      const passMap = new Map([[candidateId, passRow.rows[0]?.password_hash]]);
+      const existing = await loadOneCandidate(client, candidateId);
+      const merged = {
+        ...existing,
+        status: "APPLIED",
+        jobId,
+        cv: entry.cv_text || existing.cv || "",
+        cvFile: cvFile || existing.cvFile,
+        fromTalentPool: true,
+        applicationHistory: [...(existing.applicationHistory || []), newApp],
+      };
+      const existingS3Key = await fetchCandidateCvS3Key(pool, candidateId);
+      await patchCandidateFromClient(client, merged, passMap, { existingS3Key });
+    } else {
+      candidateId = `C${Date.now()}`;
+      const nc = {
+        id: candidateId,
+        name: entry.name,
+        email: entry.email,
+        password: `talentpool${Date.now()}`,
+        cv: entry.cv_text || "",
+        cvFile,
+        status: "APPLIED",
+        jobId,
+        applicationHistory: [newApp],
+        consent: true,
+        consentAt: entry.submitted_at
+          ? new Date(entry.submitted_at).toISOString()
+          : appliedAt,
+        purposes: ["identity", "cv", "interview", "ai"],
+        grievances: [],
+        fromTalentPool: true,
+      };
+      const passMap = new Map();
+      await insertCandidateFull(client, nc, passMap, { existingS3Key: null });
+    }
+
+    await client.query(
+      `INSERT INTO talent_pool_job_mapping (talent_pool_id, job_id, mapped_at, mapped_by_hr_id)
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT DO NOTHING`,
+      [talentPoolId, jobId, new Date(), hrId || null],
+    ).catch(async (e) => {
+      if (e.code !== "42P10") {
+        await client.query(
+          `INSERT INTO talent_pool_job_mapping (talent_pool_id, job_id, mapped_at, mapped_by_hr_id)
+           VALUES ($1,$2,$3,$4)`,
+          [talentPoolId, jobId, new Date(), hrId || null],
+        );
+      }
+    });
+
+    await client.query("COMMIT");
+    const candidate = await getCandidateMe(pool, candidateId);
+    return { ok: true, candidateId, candidate, created };
+  } catch (e) {
+    try {
+      await client.query("ROLLBACK");
+    } catch (_rb) {
+      /* */
+    }
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 module.exports = {
   loadAppState,
+  loadAppStateForHr,
   saveAppState,
+  saveOneCandidate,
+  patchCandidateForHr,
+  submitTalentPoolEntry,
+  listCandidatesPaginated,
+  listCandidateStats,
+  findCandidateByEmail,
+  bulkUpdateCandidateStatus,
+  mapTalentPoolToJob,
   verifyCandidateLogin,
   verifyHrLogin,
-  updateCandidatePassword,
+  hrResetCandidatePassword,
   listJobsApi,
   getCandidateMe,
   registerCandidate,
   getApplicationIdForJob,
+  applyToJob,
   deleteJob,
 };

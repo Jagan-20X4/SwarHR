@@ -139,6 +139,7 @@ CREATE TABLE cv_attachment (
   file_ext VARCHAR(32),
   size_bytes BIGINT,
   file_data_base64 TEXT,
+  s3_key VARCHAR(512),
   CONSTRAINT uq_cv_candidate UNIQUE (candidate_id)
 );
 
@@ -184,7 +185,8 @@ CREATE TABLE talent_pool_cv_file (
   mime_type VARCHAR(255),
   file_ext VARCHAR(32),
   size_bytes BIGINT,
-  file_data_base64 TEXT
+  file_data_base64 TEXT,
+  s3_key VARCHAR(512)
 );
 
 CREATE TABLE talent_pool_job_mapping (
