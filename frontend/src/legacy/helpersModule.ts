@@ -451,6 +451,34 @@ export const HR_REATTEMPT_REASON_LABELS = {
   BUSINESS_EXCEPTION: "Business exception approval",
   BORDERLINE_HIGH_POTENTIAL: "Borderline score – high potential reassessment",
 };
+/** HR-approved reattempt must be started within this many hours (reattempt_resolved_at). */
+export const REATTEMPT_COMPLETION_HOURS = 72;
+export const REATTEMPT_DEADLINE_MS = REATTEMPT_COMPLETION_HOURS * 60 * 60 * 1000;
+export const REATTEMPT_DEADLINE_EXPIRED_MESSAGE =
+  "Your reattempt window has closed (72 hours). Please contact career@indiraivf.in if you need assistance.";
+export function isApprovedReattemptWindow(app) {
+  if (!app?.reattemptResolvedAt || !app?.reattemptHrReasonCode) return false;
+  const ic =
+    app.interviewCompletionStatus ||
+    (app.interviewCompletedAt ? "completed" : "not_started");
+  return ic === "not_started" && !app.interviewCompletedAt;
+}
+export function reattemptDeadlineStatus(app, nowMs = Date.now()) {
+  if (!isApprovedReattemptWindow(app)) {
+    return { applies: false, expired: false, deadlineMs: null, remainingMs: null };
+  }
+  const resolvedMs = new Date(app.reattemptResolvedAt).getTime();
+  if (Number.isNaN(resolvedMs)) {
+    return { applies: false, expired: false, deadlineMs: null, remainingMs: null };
+  }
+  const deadlineMs = resolvedMs + REATTEMPT_DEADLINE_MS;
+  return {
+    applies: true,
+    expired: nowMs >= deadlineMs,
+    deadlineMs,
+    remainingMs: Math.max(0, deadlineMs - nowMs),
+  };
+}
 export function interviewEligibleForJob(c, jobId) {
   const app = getLatestAppForJob(c?.applicationHistory || [], jobId);
   if (!app) return { ok: false, reason: "No application for this role." };
@@ -463,7 +491,13 @@ export function interviewEligibleForJob(c, jobId) {
   if (!hasMeta && (ic === "completed" || app.interviewCompletedAt) && rs === "none" && transcriptAvailableForJob(c, jobId)) {
     return { ok: false, reason: "Interview already completed. Use Request reattempt on your dashboard if HR allows another attempt." };
   }
-  if (ic === "not_started" || ic === "in_progress") return { ok: true };
+  if (ic === "not_started" || ic === "in_progress") {
+    const rd = reattemptDeadlineStatus(app);
+    if (rd.applies && rd.expired && ic === "not_started") {
+      return { ok: false, reason: REATTEMPT_DEADLINE_EXPIRED_MESSAGE };
+    }
+    return { ok: true };
+  }
   if (ic === "incomplete_technical") {
     if (rs === "approved") return { ok: true };
     if (rs === "pending") return { ok: false, reason: "Your reattempt request is pending HR approval." };
@@ -478,6 +512,8 @@ export function interviewEligibleForJob(c, jobId) {
 /** After scheduled start, candidate may press Start for this many minutes (single source of truth). */
 export const INTERVIEW_START_GRACE_MINUTES = 15;
 export const INTERVIEW_START_GRACE_MS = INTERVIEW_START_GRACE_MINUTES * 60 * 1000;
+export const INTERVIEW_SLOT_CLOSED_MESSAGE =
+  "The scheduled window is closed. Please contact career@indiraivf.in";
 /** When a slot is chosen, Start is only allowed from scheduled time until grace end (unless bypassSchedule). */
 export function interviewStartSlotStatus(scheduledIso, bypassSchedule) {
   if (bypassSchedule || !scheduledIso) {
@@ -498,6 +534,19 @@ export function interviewStartSlotStatus(scheduledIso, bypassSchedule) {
     hasSlot: true,
     windowEndIso: new Date(endMs).toISOString(),
   };
+}
+/** Live countdown for a future slot, e.g. "19hr 23sec" or "50min 45sec". Null when start time has arrived. */
+export function formatInterviewCountdown(scheduledIso, nowMs = Date.now()) {
+  const schedMs = new Date(scheduledIso).getTime();
+  if (Number.isNaN(schedMs)) return null;
+  const ms = schedMs - nowMs;
+  if (ms <= 0) return null;
+  const totalSec = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) return `${hours}hr ${seconds}sec`;
+  return `${minutes}min ${seconds}sec`;
 }
 export function patchLatestApp(history, jobId, patch) {
   const h = [...(history || [])];
@@ -763,21 +812,37 @@ export function buildCvAnalyserInviteEmail({ candidateName, jobTitle, interviewL
   const cn = (candidateName && String(candidateName).trim()) || "Candidate";
   const jt = (jobTitle && String(jobTitle).trim()) || "the position";
   const link = (interviewLink && String(interviewLink).trim()) || "";
-  const subject = "Thank You for Applying – Next Step: AI Interview";
+  const subject = "Next Step: AI Interview";
   const body = `Dear ${cn},
-Thank you for applying for the ${jt} position at Indira IVF Hospital Ltd.
-As the first step in our hiring process, you are required to complete an AI‑based interview. Please use the details below to access and complete your interview within 72 hours.
+
+Thank you for your interest in the ${jt} position at Indira IVF Hospital Ltd. We have received your CV.
+
+As the first step in our hiring process, you are required to complete an AI-based interview. Please use the details below to access and complete your interview within 72 hours.
+
 AI Interview Link: ${link}
+
 Important guidelines for your AI interview
+
 To ensure your responses are captured accurately by the AI system, please make sure to:
+
 · Sit in a well-lit area with a plain white or light-coloured background
+
 · Ensure stable internet connectivity throughout the interview
+
 · Choose a quiet location with minimal background noise
+
 · Use a device with a properly functioning camera and microphone
+
 · Speak clearly and at a natural pace, and answer each question in full before moving ahead
+
 · Avoid interruptions, as the AI interview works best when completed in one continuous session
+
 Following these guidelines will help the system accurately evaluate your responses.
-Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the very best in the process.`;
+
+Thank you for your interest in joining Indira IVF Hospital Ltd. We wish you the very best in the process.
+
+Warm regards,
+Talent Acquisition Team`;
   return { subject, body };
 }
 export function savedAnalysisIsRenderable(a) {

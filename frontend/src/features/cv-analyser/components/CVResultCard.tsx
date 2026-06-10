@@ -1,14 +1,10 @@
 // @ts-nocheck
-import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import {
-  publicAppOrigin,
-  verdictLabel,
-  buildCvAnalyserInviteEmail,
-} from "@/legacy/helpersModule";
-import { Modal } from "@/shared/components/ui/Modal";
-export function CVResultCard({ row, jobTitle, inviteUrl }) {
+import React, { useState } from "react";
+import { authHeaders, verdictLabel } from "@/legacy/helpersModule";
+export function CVResultCard({ row, jobTitle, inviteUrl, recruitmentJobId }) {
   const [open, setOpen] = useState(false);
-  const [inviteModal, setInviteModal] = useState(false);
+  const [inviteBusy, setInviteBusy] = useState(false);
+  const [inviteSent, setInviteSent] = useState(false);
   if (row.loading) {
     return (
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-8 flex items-center justify-center gap-3">
@@ -27,22 +23,42 @@ export function CVResultCard({ row, jobTitle, inviteUrl }) {
   }
   const a = row.analysis || {};
   const initial = (a.candidateName && String(a.candidateName).trim()[0]) || "?";
-  const canInvite = Boolean(inviteUrl && String(inviteUrl).trim());
-  const candLabel = a.candidateName && String(a.candidateName).trim() ? String(a.candidateName).trim() : "Candidate";
-  const jtLabel = jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : "the position";
-  const { subject: inviteSubject, body: inviteBody } = buildCvAnalyserInviteEmail({
-    candidateName: candLabel,
-    jobTitle: jtLabel,
-    interviewLink: inviteUrl || "",
-  });
-  const copyFullEmail = () => {
-    const text = `Subject: ${inviteSubject}\n\n${inviteBody}`;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(() => window.alert("Copied full email to clipboard.")).catch(() => window.alert("Could not copy."));
-    } else {
-      window.prompt("Copy this email:", text);
+  const candEmail = a.email && String(a.email).trim() ? String(a.email).trim() : "";
+  const candName = a.candidateName && String(a.candidateName).trim() ? String(a.candidateName).trim() : "Candidate";
+  const canInvite = Boolean(
+    inviteUrl && String(inviteUrl).trim() && recruitmentJobId && candEmail,
+  );
+  const sendInvite = async () => {
+    if (!canInvite || inviteBusy || inviteSent) return;
+    setInviteBusy(true);
+    try {
+      const r = await fetch("/api/admin/cv-analyser/send-invite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          candidateName: candName,
+          email: candEmail,
+          jobTitle: jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : "",
+          recruitmentJobId: String(recruitmentJobId),
+        }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        window.alert(data.error || "Could not send invite email.");
+        return;
+      }
+      setInviteSent(true);
+    } catch {
+      window.alert("Could not reach server.");
+    } finally {
+      setInviteBusy(false);
     }
   };
+  const inviteDisabledReason = !recruitmentJobId || !inviteUrl
+    ? "Link a careers job in Job Master (Careers job — interview invite link) and save."
+    : !candEmail
+      ? "No email found on this CV — cannot send invite."
+      : "";
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
       <div className="flex flex-wrap items-start justify-between gap-3 mb-3">
@@ -110,12 +126,18 @@ export function CVResultCard({ row, jobTitle, inviteUrl }) {
       <div className="flex flex-wrap items-center gap-3 mb-2">
         <button
           type="button"
-          disabled={!canInvite}
-          title={canInvite ? "Open email draft with interview link" : "Link a careers job in Job Master (Careers job — interview invite link) and save."}
-          onClick={() => canInvite && setInviteModal(true)}
-          className={`text-xs font-bold px-4 py-2 rounded-xl border transition-colors ${canInvite ? "border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100" : "border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"}`}
+          disabled={!canInvite || inviteBusy || inviteSent}
+          title={canInvite ? `Send interview invite to ${candEmail}` : inviteDisabledReason}
+          onClick={sendInvite}
+          className={`text-xs font-bold px-4 py-2 rounded-xl border transition-colors ${
+            inviteSent
+              ? "border-green-600 text-green-800 bg-green-50 cursor-default"
+              : canInvite
+                ? "border-teal-600 text-teal-800 bg-teal-50 hover:bg-teal-100"
+                : "border-slate-200 text-slate-400 bg-slate-50 cursor-not-allowed"
+          }`}
         >
-          Sent invite
+          {inviteBusy ? "Sending…" : inviteSent ? "Invite sent ✓" : "Send invite"}
         </button>
         <button type="button" onClick={() => setOpen((o) => !o)} className="text-xs font-bold text-indigo-600 hover:text-indigo-800">
           {open ? "Hide details" : "Show details"}
@@ -135,20 +157,6 @@ export function CVResultCard({ row, jobTitle, inviteUrl }) {
           ) : null}
         </div>
       ) : null}
-      {inviteModal ? (
-        <Modal title="Interview invite email" onClose={() => setInviteModal(false)} wide>
-          <p className="text-xs text-slate-500 mb-3">Copy into your email client. Interview link base: <span className="font-mono text-[11px]">{publicAppOrigin()}</span> (set <span className="font-mono text-[10px]">VITE_PUBLIC_APP_URL</span> in <span className="font-mono text-[10px]">frontend/.env</span> for production; otherwise uses this tab&apos;s origin).</p>
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Subject</label>
-          <input readOnly className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm mb-3 bg-slate-50" value={inviteSubject} onFocus={(e) => e.target.select()} />
-          <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Body</label>
-          <textarea readOnly rows={20} className="w-full border border-slate-200 rounded-xl px-3 py-2 text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed mb-4" value={inviteBody} onFocus={(e) => e.target.select()} />
-          <div className="flex flex-wrap gap-2">
-            <button type="button" onClick={copyFullEmail} className="px-4 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold">Copy subject + body</button>
-            <button type="button" onClick={() => setInviteModal(false)} className="px-4 py-2.5 rounded-xl border border-slate-200 text-slate-600 text-sm font-bold">Close</button>
-          </div>
-        </Modal>
-      ) : null}
     </div>
   );
 }
-

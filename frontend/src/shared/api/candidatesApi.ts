@@ -126,3 +126,24 @@ export async function findCandidateIdByEmail(email) {
   const j = await r.json();
   return j.id;
 }
+
+export async function exportCandidateReport({ status, search } = {}) {
+  const q = new URLSearchParams();
+  if (status) q.set("status", status);
+  if (search) q.set("search", search);
+  const r = await fetch(`/api/candidates/export?${q}`, apiFetchInit());
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.error || "export");
+  }
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const stamp = new Date().toISOString().slice(0, 10);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `candidate-report-${stamp}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}

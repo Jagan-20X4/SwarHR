@@ -2108,7 +2108,7 @@ function TalentPoolBrowse({ talentPool, jobs, candidates, onMapToJob, onLogAudit
         />
       ) : null}
     <div className="min-h-screen bg-slate-50">
-      <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3 flex-wrap"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Talent Pool</span><span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{talentPool.length} profiles</span><span className="text-xs text-slate-400 ml-auto">All access logged (§8)</span></div>
+      <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3 flex-wrap"><button onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Talent Pool</span><span className="text-xs text-indigo-300 bg-indigo-900/50 px-2 py-0.5 rounded-full">{talentPool.length} profiles</span><span className="text-xs text-slate-400 ml-auto"></span></div>
       {selected && (
         <Modal title={selected.name} onClose={() => { setSelected(null); setMapping(false); setMapJobId(""); setResumePreview(null); }} wide>
           <div className="space-y-4">

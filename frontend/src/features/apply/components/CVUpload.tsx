@@ -5,7 +5,7 @@ import {
   fileIcon,
   processResumeFile,
 } from "@/legacy/helpersModule";
-export function CVUpload({ jobTitle, onComplete, onBack, maxCvMb }) {
+export function CVUpload({ jobTitle, onComplete, onBack, maxCvMb, submitLabel }) {
   const [file, setFile] = useState(null), [processing, setProcessing] = useState(false), [submitting, setSubmitting] = useState(false), [error, setError] = useState(""), [ack, setAck] = useState(false);
   const ref = useRef();
   const mb = typeof maxCvMb === "number" ? maxCvMb : 5;
@@ -39,7 +39,7 @@ export function CVUpload({ jobTitle, onComplete, onBack, maxCvMb }) {
           <input ref={ref} type="file" accept=".jpg,.jpeg,.pdf,.doc,.docx" onChange={e => handleFile(e.target.files?.[0])} className="hidden"/>
           {error && <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded-xl text-sm mb-4 flex gap-2"><span>⚠</span><span>{error}</span></div>}
           <label className={`flex gap-3 p-3 rounded-xl border mb-4 ${busy ? "opacity-60" : "cursor-pointer"} ${ack ? "border-indigo-300 bg-indigo-50" : "border-slate-200"}`}><input type="checkbox" checked={ack} onChange={() => setAck(!ack)} disabled={busy} className="mt-0.5 w-4 h-4 accent-indigo-500 shrink-0"/><p className="text-xs text-slate-600">I acknowledge processing for recruitment.</p></label>
-          <button onClick={handleSubmit} disabled={!file || !ack || busy} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">{submitting ? "Submitting application…" : "Submit →"}</button>
+          <button onClick={handleSubmit} disabled={!file || !ack || busy} className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 disabled:bg-slate-200 text-white font-bold rounded-xl">{submitting ? "Submitting application…" : (submitLabel || "Submit →")}</button>
         </div>
       </div>
     </div>

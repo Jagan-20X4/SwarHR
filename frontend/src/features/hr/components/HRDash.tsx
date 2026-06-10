@@ -11,13 +11,14 @@ import { Badge } from "@/shared/components/ui/Badge";
 import {
   fetchCandidateStats,
   fetchCandidatesPage,
+  exportCandidateReport,
 } from "@/shared/api/candidatesApi";
+import { fetchTalentPoolStats } from "@/shared/api/talentPoolApi";
 
 const PAGE_SIZE = 50;
 
 export function HRDash({
   jobs,
-  talentPool,
   reattemptPendingCount,
   onView,
   onInterview,
@@ -40,6 +41,14 @@ export function HRDash({
   const [list, setList] = useState({ candidates: [], total: 0, totalPages: 1 });
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState(null);
+  const [talentPoolTotal, setTalentPoolTotal] = useState(null);
+  const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    fetchTalentPoolStats()
+      .then((s) => setTalentPoolTotal(s.total ?? 0))
+      .catch(() => setTalentPoolTotal(null));
+  }, []);
 
   useEffect(() => {
     const t = setTimeout(() => setSearchDebounced(search.trim()), 350);
@@ -120,6 +129,21 @@ export function HRDash({
   const filtered = list.candidates || [];
   const totalPages = list.totalPages || 1;
 
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      await exportCandidateReport({
+        status: filter === "ALL" ? undefined : filter,
+        search: searchDebounced || undefined,
+      });
+    } catch (e) {
+      console.error(e);
+      alert("Could not export candidate report. Please try again.");
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
@@ -148,7 +172,7 @@ export function HRDash({
             onClick={onTalentPool}
             className="px-3 py-1.5 bg-purple-700 hover:bg-purple-600 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform"
           >
-            🌟 Talent Pool ({talentPool.length})
+            🌟 Talent Pool ({talentPoolTotal ?? "…"})
           </button>
           <button
             onClick={onScreen}
@@ -224,6 +248,14 @@ export function HRDash({
               placeholder="Search name or email…"
               className="px-3 py-2 border border-slate-200 rounded-lg text-sm w-56"
             />
+            <button
+              type="button"
+              onClick={() => void handleExport()}
+              disabled={exporting}
+              className="px-3 py-2 bg-teal-700 hover:bg-teal-600 text-white rounded-lg text-sm font-bold disabled:opacity-50 whitespace-nowrap"
+            >
+              {exporting ? "Exporting…" : "Export Candidate details"}
+            </button>
             {filter !== "ALL" && (
               <button
                 onClick={() => setFilter("ALL")}

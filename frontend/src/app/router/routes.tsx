@@ -64,14 +64,7 @@ export function AppRoutes() {
               </ProtectedRoute>
             }
           />
-          <Route
-            path="jobs/:jobId/apply"
-            element={
-              <ProtectedRoute role="candidate">
-                <ApplyPage />
-              </ProtectedRoute>
-            }
-          />
+          <Route path="jobs/:jobId/apply" element={<ApplyPage />} />
           <Route
             path="interview"
             element={

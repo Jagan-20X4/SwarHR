@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import {
   parsePath,
   patchLatestApp,
@@ -10,11 +10,17 @@ import {
   fmtDateTime,
   postInterviewAbandonWithFallback,
   INTERVIEW_START_GRACE_MINUTES,
+  INTERVIEW_SLOT_CLOSED_MESSAGE,
 } from "@/legacy/helpersModule";
 import { Intro } from "@/features/interview/components/Intro";
 import { Interview } from "@/features/interview/components/Interview";
 import { Done } from "@/features/interview/components/Done";
 import { useAppState } from "@/app/state/AppStateProvider";
+import {
+  sendIntroInterviewEmail,
+  sendScheduledInterviewEmail,
+  sendCompletionInterviewEmail,
+} from "@/shared/api/meApi";
 
 export function InterviewFlowPage() {
   const {
@@ -38,6 +44,28 @@ export function InterviewFlowPage() {
   useEffect(() => {
     if (!interviewPhase) setInterviewPhase("intro");
   }, [interviewPhase, setInterviewPhase]);
+
+  const introEmailSentRef = useRef(false);
+  useEffect(() => {
+    if (interviewPhase !== "intro" || !active || role === "hr") return;
+    const jid = selJob?.id || active?.jobId;
+    if (!jid || introEmailSentRef.current) return;
+    introEmailSentRef.current = true;
+    void sendIntroInterviewEmail({
+      jobId: jid,
+      applicationId: resolvedApplicationId ?? undefined,
+    }).catch((err) => {
+      console.error("Intro interview email failed:", err);
+      introEmailSentRef.current = false;
+    });
+  }, [
+    interviewPhase,
+    active,
+    role,
+    selJob?.id,
+    active?.jobId,
+    resolvedApplicationId,
+  ]);
 
   if (!active) return null;
 
@@ -116,6 +144,14 @@ export function InterviewFlowPage() {
               await patchCandidateForHr(active.id, merged);
             } else {
               await persistCandidateNow(merged);
+              if (jid) {
+                void sendCompletionInterviewEmail({
+                  jobId: jid,
+                  applicationId: appId ?? undefined,
+                }).catch((err) => {
+                  console.error("Completion interview email failed:", err);
+                });
+              }
             }
           } catch (err) {
             console.error("Interview save failed:", err);
@@ -145,20 +181,47 @@ export function InterviewFlowPage() {
         getLatestAppForJob(active.applicationHistory, selJob?.id || active?.jobId)
           ?.interviewScheduledAt
       }
-      onSchedule={(iso) => {
+      onSchedule={async (iso) => {
         const jid = selJob?.id || active?.jobId;
         if (!jid) return;
         const prev = getLatestAppForJob(active.applicationHistory, jid)?.interviewScheduledAt;
-        upd({
-          applicationHistory: patchLatestApp(active.applicationHistory, jid, {
-            interviewScheduledAt: iso,
-          }),
-        });
+        const appId = resolvedApplicationId;
+        const schedulePatch = { interviewScheduledAt: iso };
+        let nextHist = active.applicationHistory || [];
+        if (appId != null) {
+          nextHist = patchApplicationById(nextHist, appId, schedulePatch);
+        } else {
+          nextHist = patchLatestApp(nextHist, jid, schedulePatch);
+        }
+        const merged = { ...active, applicationHistory: nextHist };
+        upd({ applicationHistory: nextHist });
+        try {
+          if (role === "hr") {
+            await patchCandidateForHr(active.id, merged);
+          } else {
+            await persistCandidateNow(merged);
+          }
+        } catch (err) {
+          console.error("Schedule save failed:", err);
+          window.alert("Could not save your schedule. Please try again.");
+          return;
+        }
         const wasReschedule = !!(prev && String(prev) !== String(iso));
         setScheduleBoardFlash({ jobId: jid, at: iso, rescheduled: wasReschedule });
-        setTimeout(() => {
-          syncStateFromServer().catch(() => {});
-        }, 1000);
+        void sendScheduledInterviewEmail({
+          jobId: jid,
+          scheduledAt: iso,
+          applicationId: appId ?? undefined,
+        }).catch((err) => {
+          console.error("Scheduled interview email failed:", err);
+        });
+        if (role !== "hr") {
+          try {
+            await syncStateFromServer();
+          } catch (_) {}
+          setInterviewPhase(null);
+          navigate("/");
+        }
       }}
       onLogout={logout}
       onStart={(lang) => {
@@ -175,7 +238,7 @@ export function InterviewFlowPage() {
             window.alert(
               slot.tooEarly
                 ? `Start unlocks at ${fmtDateTime(sched)}. You have ${INTERVIEW_START_GRACE_MINUTES} minutes after that to begin.`
-                : `This slot closed at ${fmtDateTime(slot.windowEndIso)}. Pick a new time with Maybe later.`,
+                : INTERVIEW_SLOT_CLOSED_MESSAGE,
             );
             return;
           }

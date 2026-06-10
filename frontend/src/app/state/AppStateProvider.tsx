@@ -39,6 +39,29 @@ import {
   patchCandidateById,
   mapTalentPoolToJob as mapTalentPoolToJobApi,
 } from "@/shared/api/candidatesApi";
+import { SS_PENDING_JOB_APPLY } from "@/constants/storageKeys";
+
+function persistGuestJobApply(pending) {
+  try {
+    sessionStorage.setItem(SS_PENDING_JOB_APPLY, JSON.stringify(pending));
+  } catch (_) {}
+}
+
+function loadGuestJobApplyFromStorage() {
+  try {
+    const raw = sessionStorage.getItem(SS_PENDING_JOB_APPLY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearGuestJobApplyStorage() {
+  try {
+    sessionStorage.removeItem(SS_PENDING_JOB_APPLY);
+  } catch (_) {}
+}
 
 const AppStateContext = createContext(null);
 
@@ -81,6 +104,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const candidateLoginPreferHomeRef = useRef(false);
   /** Guest talent-pool form data + CV; set on TP submit before register, cleared after HR-visible save or abandon. */
   const tpGuestEntryRef = useRef(null);
+  /** Guest job apply: CV + jobId saved before login/register; cleared after /api/me/apply. */
+  const guestJobApplyRef = useRef(null);
   /** Prefill CandReg when guest continues from talent pool (stable props for controlled fields). */
   const [tpGuestRegPrefill, setTpGuestRegPrefill] = useState(null);
   /** After scheduling from Intro, highlights job card / portal: `{ jobId, at, rescheduled }`. */
@@ -166,7 +191,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     }));
     setJobs(merged.length ? merged : boardJobs);
     setCandidates([]);
-    setTalentPool(st.talentPool || []);
+    setTalentPool([]);
     setAuditLog(st.auditLog || []);
     setMeta(st.meta || jd.meta || null);
     setCanPersist(true);
@@ -203,7 +228,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
             }));
             setJobs(merged.length ? merged : boardJobs);
             setCandidates([]);
-            setTalentPool(st.talentPool || []);
+            setTalentPool([]);
             setAuditLog(st.auditLog || []);
             setMeta(st.meta || boardMeta);
             loaded = true;
@@ -253,9 +278,16 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!storageReady) return;
+    if (!guestJobApplyRef.current) {
+      const stored = loadGuestJobApplyFromStorage();
+      if (stored) guestJobApplyRef.current = stored;
+    }
+  }, [storageReady]);
+
+  useEffect(() => {
+    if (!storageReady) return;
     const rt = parsePath(loc.path, loc.search);
     if (rt.name !== "apply") return;
-    if (localStorage.getItem(LS_ROLE) !== "candidate") return;
     const j = jobs.find((x) => x.id === rt.jobId);
     if (j) setSelJob(j);
   }, [loc.path, loc.search, storageReady, jobs]);
@@ -312,7 +344,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       if (r0 === "hr") {
         hrSavePayloadRef.current = {
           jobs,
-          talentPool,
           auditLog,
           saveCandidates: false,
         };
@@ -346,7 +377,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     return () => clearTimeout(saveTimer.current);
   }, [
     jobs,
-    talentPool,
     auditLog,
     candidates,
     storageReady,
@@ -526,6 +556,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     setAuditLog([]);
     navigate("/");
     setInterviewPhase(null);
+    guestJobApplyRef.current = null;
+    clearGuestJobApplyStorage();
     try {
       const jRes = await fetch("/api/jobs", apiFetchInit());
       if (jRes.ok) {
@@ -561,11 +593,84 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     const r0 = localStorage.getItem(LS_ROLE);
     if (r0 !== "candidate") {
       candidateLoginPreferHomeRef.current = false;
-      navigate("/login?returnTo=" + encodeURIComponent("/jobs/" + job.id + "/apply"));
+      setSelJob(job);
+      navigate("/jobs/" + job.id + "/apply");
       return;
     }
     if (!active) return;
     handleApplyToJob(job);
+  };
+
+  const clearGuestJobApply = useCallback(() => {
+    guestJobApplyRef.current = null;
+    clearGuestJobApplyStorage();
+  }, []);
+
+  const finalizeGuestJobApply = useCallback(async () => {
+    let pending = guestJobApplyRef.current;
+    if (!pending) pending = loadGuestJobApplyFromStorage();
+    if (!pending?.jobId || !pending?.cvFile) return false;
+
+    guestJobApplyRef.current = null;
+    clearGuestJobApplyStorage();
+    cancelPendingSave();
+
+    try {
+      const res = await fetch(
+        "/api/me/apply",
+        apiFetchInit({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jobId: pending.jobId,
+            cv: pending.cvText || pending.cvFile.cvText || "",
+            cvFile: pending.cvFile,
+          }),
+        }),
+      );
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        alert(body.error || "Could not submit application. Please try again.");
+        guestJobApplyRef.current = pending;
+        persistGuestJobApply(pending);
+        return false;
+      }
+      const me = body.candidate;
+      if (!me?.id) {
+        alert("Application saved but profile could not be loaded. Refresh and try again.");
+        guestJobApplyRef.current = pending;
+        persistGuestJobApply(pending);
+        return false;
+      }
+      skipAutoSaveRef.current = true;
+      setCandidates([me]);
+      setActiveId(me.id);
+      setCanPersist(true);
+      const j = jobs.find((x) => x.id === pending.jobId);
+      if (j) setSelJob(j);
+      startInterview();
+      return true;
+    } catch (e) {
+      console.error(e);
+      alert("Could not reach server. Check your connection and try again.");
+      guestJobApplyRef.current = pending;
+      persistGuestJobApply(pending);
+      return false;
+    }
+  }, [jobs, startInterview]);
+
+  const handleGuestCVUploaded = async (file) => {
+    if (!file || !selJob) return;
+    const pending = {
+      jobId: selJob.id,
+      jobTitle: selJob.title,
+      cvFile: file,
+      cvText: file.cvText || "",
+    };
+    guestJobApplyRef.current = pending;
+    persistGuestJobApply(pending);
+    candidateLoginPreferHomeRef.current = false;
+    navigate("/login");
   };
 
   const handleCVUploaded = async (file) => {
@@ -609,23 +714,6 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     try {
       const out = await mapTalentPoolToJobApi(entry.id, jobId);
       if (out.candidate) mergeCandidateInCache(out.candidate);
-      setTalentPool((p) =>
-        p.map((t) =>
-          t.id === entry.id
-            ? {
-                ...t,
-                mappedToJobs: [
-                  ...(t.mappedToJobs || []),
-                  {
-                    jobId,
-                    mappedAt: new Date().toISOString(),
-                    mappedBy: hrId || "HR",
-                  },
-                ],
-              }
-            : t,
-        ),
-      );
       return out;
     } catch (e) {
       console.error(e);
@@ -678,6 +766,9 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setTpFromPortal,
       candidateLoginPreferHomeRef,
       tpGuestEntryRef,
+      guestJobApplyRef,
+      clearGuestJobApply,
+      finalizeGuestJobApply,
       tpGuestRegPrefill,
       setTpGuestRegPrefill,
       scheduleBoardFlash,
@@ -713,6 +804,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       handleApplyToJob,
       handleJobBoardApply,
       handleCVUploaded,
+      handleGuestCVUploaded,
       handleTalentPoolMap,
       mergeCandidateInCache,
       fetchCandidateForHr,
@@ -763,6 +855,8 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       fetchCandidateForHr,
       patchCandidateForHr,
       upd,
+      clearGuestJobApply,
+      finalizeGuestJobApply,
     ],
   );
 

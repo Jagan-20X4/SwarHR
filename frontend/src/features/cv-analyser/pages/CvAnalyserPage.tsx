@@ -477,6 +477,7 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
                   row={row}
                   jobTitle={inviteJobTitle}
                   inviteUrl={inviteApplyUrl}
+                  recruitmentJobId={inviteRecruitmentId}
                 />
               ))}
             </div>

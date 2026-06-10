@@ -13,6 +13,13 @@ const {
   repairCompletedInterviewsForCandidate,
   repairCompletedInterviewsForCandidateIds,
 } = require("./lib/interviewFinalize");
+const {
+  notifyPendingHrDecisionEmailsForCandidate,
+} = require("./lib/interviewEmailService");
+const {
+  buildCandidateExportCsv,
+  shouldIncludeGuestTalentPoolExport,
+} = require("./lib/candidateExport");
 
 function looksLikeBcrypt(s) {
   return typeof s === "string" && s.startsWith("$2") && s.length > 50;
@@ -78,7 +85,7 @@ async function bumpApplicationIdSequence(client) {
   }
 }
 
-async function insertApplicationRow(client, candidateId, a, explicitId) {
+async function insertApplicationRow(client, candidateId, a, explicitId, hrId) {
   const f = applicationFieldValues(a);
   const cols = explicitId != null ? "id, " : "";
   const idPlaceholder = explicitId != null ? "$1, " : "";
@@ -116,7 +123,9 @@ async function insertApplicationRow(client, candidateId, a, explicitId) {
        ) VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)},${ph(6)},${ph(7)},${ph(8)},${ph(9)},${ph(10)},${ph(11)},${ph(12)},${ph(13)},${ph(14)},${ph(15)},${ph(16)},${ph(17)}) RETURNING id`,
       params,
     );
-    return Number(ins.rows[0].id);
+    const newId = Number(ins.rows[0].id);
+    await maybeRecordHrDecision(client, newId, candidateId, a, hrId);
+    return newId;
   } catch (e) {
     if (e.code === "42703") {
       const slimParams = [
@@ -147,7 +156,9 @@ async function insertApplicationRow(client, candidateId, a, explicitId) {
            ) VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)},${ph(6)},${ph(7)},${ph(8)},${ph(9)},${ph(10)},${ph(11)},${ph(12)},${ph(13)},${ph(14)}) RETURNING id`,
           slimParams,
         );
-        return Number(ins.rows[0].id);
+        const newId = Number(ins.rows[0].id);
+        await maybeRecordHrDecision(client, newId, candidateId, a, hrId);
+        return newId;
       } catch (e2) {
         if (e2.code === "42703") {
           const minParams = [
@@ -163,7 +174,9 @@ async function insertApplicationRow(client, candidateId, a, explicitId) {
              VALUES (${idPlaceholder}${ph(1)},${ph(2)},${ph(3)},${ph(4)},${ph(5)}) RETURNING id`,
             minParams,
           );
-          return Number(ins.rows[0].id);
+          const newId = Number(ins.rows[0].id);
+          await maybeRecordHrDecision(client, newId, candidateId, a, hrId);
+          return newId;
         }
         throw e2;
       }
@@ -172,7 +185,26 @@ async function insertApplicationRow(client, candidateId, a, explicitId) {
   }
 }
 
-async function updateApplicationRow(client, applicationId, candidateId, a) {
+async function maybeRecordHrDecision(client, applicationId, candidateId, a, hrId) {
+  if (!hrId) return;
+  const f = applicationFieldValues(a);
+  const isDecision =
+    a.hrDecisionStatus === "SHORTLISTED" || a.hrDecisionStatus === "REJECTED";
+  const interviewDone =
+    f.ic === "completed" || Boolean(f.interviewCompletedAt);
+  if (!isDecision || !interviewDone) return;
+  try {
+    await client.query(
+      `UPDATE application SET hr_decision_at = NOW(), hr_decided_by_hr_id = $3
+       WHERE id = $1 AND candidate_id = $2`,
+      [applicationId, candidateId, hrId],
+    );
+  } catch (e) {
+    if (e.code !== "42703") throw e;
+  }
+}
+
+async function updateApplicationRow(client, applicationId, candidateId, a, hrId) {
   const f = applicationFieldValues(a);
   try {
     await client.query(
@@ -235,10 +267,11 @@ async function updateApplicationRow(client, applicationId, candidateId, a) {
       );
     } else throw e;
   }
+  await maybeRecordHrDecision(client, applicationId, candidateId, a, hrId);
   return applicationId;
 }
 
-async function upsertApplicationRow(client, candidateId, a) {
+async function upsertApplicationRow(client, candidateId, a, hrId) {
   const explicitId = parseExplicitApplicationId(a);
   if (explicitId != null) {
     const ex = await client.query(
@@ -246,11 +279,11 @@ async function upsertApplicationRow(client, candidateId, a) {
       [explicitId, candidateId],
     );
     if (ex.rows.length > 0) {
-      return updateApplicationRow(client, explicitId, candidateId, a);
+      return updateApplicationRow(client, explicitId, candidateId, a, hrId);
     }
-    return insertApplicationRow(client, candidateId, a, explicitId);
+    return insertApplicationRow(client, candidateId, a, explicitId, hrId);
   }
-  return insertApplicationRow(client, candidateId, a, null);
+  return insertApplicationRow(client, candidateId, a, null, hrId);
 }
 
 async function writeTranscriptLines(client, candidateId, applicationId, lines) {
@@ -785,6 +818,388 @@ async function loadTalentPool(client) {
   return out;
 }
 
+function encodeTalentPoolCursor(row) {
+  const payload = JSON.stringify({
+    t:
+      row.submitted_at instanceof Date
+        ? row.submitted_at.toISOString()
+        : String(row.submitted_at),
+    id: row.id,
+  });
+  return Buffer.from(payload, "utf8").toString("base64url");
+}
+
+function decodeTalentPoolCursor(cursor) {
+  if (!cursor || typeof cursor !== "string") return null;
+  try {
+    const o = JSON.parse(
+      Buffer.from(cursor, "base64url").toString("utf8"),
+    );
+    if (!o?.t || !o?.id) return null;
+    return { submittedAt: o.t, id: String(o.id) };
+  } catch {
+    return null;
+  }
+}
+
+function talentPoolRowToClient(e, roles, skills, cvRow, maps, hasPreferredCities) {
+  const cvFile = cvRow
+    ? {
+        name: cvRow.file_name || "cv",
+        ext: cvRow.file_ext || "pdf",
+        mime: cvRow.mime_type || "application/pdf",
+        size: cvRow.size_bytes ?? 0,
+      }
+    : null;
+  return {
+    id: e.id,
+    candidateId: e.linked_candidate_id,
+    name: e.name,
+    email: e.email,
+    phone: e.phone || "",
+    desiredRoles: roles,
+    skills,
+    experience: e.experience_years ?? 0,
+    location: e.location || "",
+    keywords: e.keywords || "",
+    qualification: e.qualification != null ? String(e.qualification) : "",
+    currentCtc: e.current_ctc != null ? String(e.current_ctc) : "",
+    currentEmployer: e.current_employer != null ? String(e.current_employer) : "",
+    source: e.source != null ? String(e.source) : "",
+    applicationDate:
+      e.application_date != null
+        ? new Date(e.application_date).toISOString().slice(0, 10)
+        : "",
+    coolingPeriod: e.cooling_period != null ? String(e.cooling_period) : "",
+    preferredCity1:
+      hasPreferredCities && e.preferred_city_1 != null
+        ? String(e.preferred_city_1)
+        : "",
+    preferredCity2:
+      hasPreferredCities && e.preferred_city_2 != null
+        ? String(e.preferred_city_2)
+        : "",
+    preferredCity3:
+      hasPreferredCities && e.preferred_city_3 != null
+        ? String(e.preferred_city_3)
+        : "",
+    cvText: e.cv_text || "",
+    submittedAt: new Date(e.submitted_at).toISOString(),
+    cvFile,
+    hasCv: Boolean(cvRow),
+    mappedToJobs: maps,
+  };
+}
+
+async function loadTalentPoolEntryRow(client, id) {
+  let entries;
+  let hasPreferredCities = true;
+  try {
+    entries = await client.query(
+      `SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+              qualification, current_ctc, current_employer, source, application_date, cooling_period,
+              preferred_city_1, preferred_city_2, preferred_city_3
+       FROM talent_pool_entry WHERE id = $1`,
+      [id],
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      hasPreferredCities = false;
+      entries = await client.query(
+        `SELECT id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
+                qualification, current_ctc, current_employer, source, application_date, cooling_period
+         FROM talent_pool_entry WHERE id = $1`,
+        [id],
+      );
+    } else throw e;
+  }
+  const e = entries.rows[0];
+  if (!e) return null;
+
+  const roles = await client.query(
+    "SELECT role_name FROM talent_pool_desired_role WHERE talent_pool_id = $1 ORDER BY role_name",
+    [e.id],
+  );
+  const skills = await client.query(
+    "SELECT skill_name FROM talent_pool_skill WHERE talent_pool_id = $1 ORDER BY skill_name",
+    [e.id],
+  );
+  let cvf;
+  try {
+    cvf = await client.query(
+      `SELECT ${CV_SELECT_WITH_S3} FROM talent_pool_cv_file WHERE talent_pool_id = $1`,
+      [e.id],
+    );
+  } catch (err) {
+    if (err.code === "42703") {
+      cvf = await client.query(
+        "SELECT file_name, mime_type, file_ext, size_bytes, file_data_base64 FROM talent_pool_cv_file WHERE talent_pool_id = $1",
+        [e.id],
+      );
+    } else throw err;
+  }
+  const maps = await client.query(
+    "SELECT job_id, mapped_at, mapped_by_hr_id FROM talent_pool_job_mapping WHERE talent_pool_id = $1 ORDER BY mapped_at",
+    [e.id],
+  );
+  const cvRow = cvf.rows[0];
+  const base = talentPoolRowToClient(
+    e,
+    roles.rows.map((r) => r.role_name),
+    skills.rows.map((r) => r.skill_name),
+    cvRow,
+    maps.rows.map((m) => ({
+      jobId: m.job_id,
+      mappedAt: new Date(m.mapped_at).toISOString(),
+      mappedBy: m.mapped_by_hr_id || "",
+    })),
+    hasPreferredCities,
+  );
+  if (cvRow) {
+    base.cvFile = await cvFileFromDbRow(cvRow);
+    if (base.cvFile) base.hasCv = true;
+  }
+  return base;
+}
+
+async function countTalentPool(pool) {
+  const r = await pool.query("SELECT COUNT(*)::int AS total FROM talent_pool_entry");
+  return r.rows[0]?.total ?? 0;
+}
+
+async function getTalentPoolById(pool, id) {
+  const client = await pool.connect();
+  try {
+    return await loadTalentPoolEntryRow(client, id);
+  } finally {
+    client.release();
+  }
+}
+
+function buildTalentPoolFilterWhere({
+  role,
+  skill,
+  minExp,
+  maxExp,
+  location,
+  source,
+  keyword,
+  fromDate,
+  toDate,
+} = {}) {
+  const params = [];
+  const where = [];
+
+  if (keyword) {
+    params.push(`%${keyword.toLowerCase()}%`);
+    const p = `$${params.length}`;
+    where.push(`(
+      lower(e.name) LIKE ${p} OR lower(e.email) LIKE ${p}
+      OR lower(COALESCE(e.keywords, '')) LIKE ${p}
+      OR lower(COALESCE(e.cv_text, '')) LIKE ${p}
+      OR lower(COALESCE(e.qualification, '')) LIKE ${p}
+      OR lower(COALESCE(e.current_employer, '')) LIKE ${p}
+      OR lower(COALESCE(e.location, '')) LIKE ${p}
+      OR lower(COALESCE(e.source, '')) LIKE ${p}
+      OR lower(COALESCE(e.preferred_city_1, '')) LIKE ${p}
+      OR lower(COALESCE(e.preferred_city_2, '')) LIKE ${p}
+      OR lower(COALESCE(e.preferred_city_3, '')) LIKE ${p}
+    )`);
+  }
+  if (location) {
+    params.push(`%${location.toLowerCase()}%`);
+    where.push(`lower(COALESCE(e.location, '')) LIKE $${params.length}`);
+  }
+  if (source) {
+    params.push(source);
+    where.push(`e.source = $${params.length}`);
+  }
+  if (minExp != null && minExp !== "" && !Number.isNaN(Number(minExp))) {
+    params.push(Number(minExp));
+    where.push(`COALESCE(e.experience_years, 0) >= $${params.length}`);
+  }
+  if (maxExp != null && maxExp !== "" && !Number.isNaN(Number(maxExp))) {
+    params.push(Number(maxExp));
+    where.push(`COALESCE(e.experience_years, 0) <= $${params.length}`);
+  }
+  if (fromDate) {
+    params.push(fromDate);
+    where.push(`e.submitted_at >= $${params.length}::date`);
+  }
+  if (toDate) {
+    params.push(toDate);
+    where.push(`e.submitted_at < ($${params.length}::date + interval '1 day')`);
+  }
+  if (role) {
+    params.push(`%${role.toLowerCase()}%`);
+    where.push(`EXISTS (
+      SELECT 1 FROM talent_pool_desired_role dr
+      WHERE dr.talent_pool_id = e.id AND lower(dr.role_name) LIKE $${params.length}
+    )`);
+  }
+  if (skill) {
+    params.push(`%${skill.toLowerCase()}%`);
+    where.push(`EXISTS (
+      SELECT 1 FROM talent_pool_skill sk
+      WHERE sk.talent_pool_id = e.id AND lower(sk.skill_name) LIKE $${params.length}
+    )`);
+  }
+
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  return { whereSql, params, where };
+}
+
+async function listTalentPoolPaginated(
+  pool,
+  {
+    page,
+    limit,
+    cursor,
+    role,
+    skill,
+    minExp,
+    maxExp,
+    location,
+    source,
+    keyword,
+    fromDate,
+    toDate,
+  },
+) {
+  const { whereSql, params, where } = buildTalentPoolFilterWhere({
+    role,
+    skill,
+    minExp,
+    maxExp,
+    location,
+    source,
+    keyword,
+    fromDate,
+    toDate,
+  });
+
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM talent_pool_entry e ${whereSql}`,
+    params,
+  );
+  const total = countRes.rows[0]?.total ?? 0;
+
+  const listWhere = [...where];
+  const listParams = [...params];
+  const decoded = decodeTalentPoolCursor(cursor);
+  if (decoded) {
+    listParams.push(decoded.submittedAt, decoded.id);
+    listWhere.push(
+      `(e.submitted_at, e.id) < ($${listParams.length - 1}::timestamptz, $${listParams.length})`,
+    );
+  }
+  const listWhereSql = listWhere.length ? `WHERE ${listWhere.join(" AND ")}` : "";
+
+  listParams.push(limit + 1);
+  let listRes;
+  try {
+    listRes = await pool.query(
+      `SELECT e.id, e.linked_candidate_id, e.name, e.email, e.phone, e.experience_years, e.location, e.keywords, e.cv_text,
+              e.submitted_at, e.qualification, e.current_ctc, e.current_employer, e.source, e.application_date, e.cooling_period,
+              e.preferred_city_1, e.preferred_city_2, e.preferred_city_3
+       FROM talent_pool_entry e
+       ${listWhereSql}
+       ORDER BY e.submitted_at DESC, e.id DESC
+       LIMIT $${listParams.length}`,
+      listParams,
+    );
+  } catch (e) {
+    if (e.code === "42703") {
+      listRes = await pool.query(
+        `SELECT e.id, e.linked_candidate_id, e.name, e.email, e.phone, e.experience_years, e.location, e.keywords, e.cv_text,
+                e.submitted_at, e.qualification, e.current_ctc, e.current_employer, e.source, e.application_date, e.cooling_period
+         FROM talent_pool_entry e
+         ${listWhereSql}
+         ORDER BY e.submitted_at DESC, e.id DESC
+         LIMIT $${listParams.length}`,
+        listParams,
+      );
+    } else throw e;
+  }
+
+  const rows = listRes.rows;
+  const hasMore = rows.length > limit;
+  const pageRows = hasMore ? rows.slice(0, limit) : rows;
+  const nextCursor =
+    hasMore && pageRows.length > 0
+      ? encodeTalentPoolCursor(pageRows[pageRows.length - 1])
+      : null;
+
+  const ids = pageRows.map((r) => r.id);
+  const rolesById = new Map();
+  const skillsById = new Map();
+  const cvById = new Map();
+  const mapsById = new Map();
+
+  if (ids.length > 0) {
+    const [rolesRes, skillsRes, cvRes, mapsRes] = await Promise.all([
+      pool.query(
+        "SELECT talent_pool_id, role_name FROM talent_pool_desired_role WHERE talent_pool_id = ANY($1::text[]) ORDER BY role_name",
+        [ids],
+      ),
+      pool.query(
+        "SELECT talent_pool_id, skill_name FROM talent_pool_skill WHERE talent_pool_id = ANY($1::text[]) ORDER BY skill_name",
+        [ids],
+      ),
+      pool.query(
+        "SELECT talent_pool_id, file_name, file_ext, size_bytes, mime_type FROM talent_pool_cv_file WHERE talent_pool_id = ANY($1::text[])",
+        [ids],
+      ),
+      pool.query(
+        "SELECT talent_pool_id, job_id, mapped_at, mapped_by_hr_id FROM talent_pool_job_mapping WHERE talent_pool_id = ANY($1::text[]) ORDER BY mapped_at",
+        [ids],
+      ),
+    ]);
+    for (const r of rolesRes.rows) {
+      if (!rolesById.has(r.talent_pool_id)) rolesById.set(r.talent_pool_id, []);
+      rolesById.get(r.talent_pool_id).push(r.role_name);
+    }
+    for (const r of skillsRes.rows) {
+      if (!skillsById.has(r.talent_pool_id)) skillsById.set(r.talent_pool_id, []);
+      skillsById.get(r.talent_pool_id).push(r.skill_name);
+    }
+    for (const r of cvRes.rows) {
+      cvById.set(r.talent_pool_id, r);
+    }
+    for (const r of mapsRes.rows) {
+      if (!mapsById.has(r.talent_pool_id)) mapsById.set(r.talent_pool_id, []);
+      mapsById.get(r.talent_pool_id).push({
+        jobId: r.job_id,
+        mappedAt: new Date(r.mapped_at).toISOString(),
+        mappedBy: r.mapped_by_hr_id || "",
+      });
+    }
+  }
+
+  const hasPreferredCities = pageRows.length > 0 && "preferred_city_1" in pageRows[0];
+  const items = pageRows.map((e) =>
+    talentPoolRowToClient(
+      e,
+      rolesById.get(e.id) || [],
+      skillsById.get(e.id) || [],
+      cvById.get(e.id) || null,
+      mapsById.get(e.id) || [],
+      hasPreferredCities,
+    ),
+  );
+
+  const pageNum = Math.max(1, parseInt(String(page || "1"), 10) || 1);
+
+  return {
+    page: pageNum,
+    limit,
+    total,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    nextCursor,
+    items,
+  };
+}
+
 async function loadAudit(client) {
   const r = await client.query(
     "SELECT id, occurred_at, actor, action, target_ref, details FROM audit_event ORDER BY occurred_at DESC",
@@ -1044,15 +1459,18 @@ async function loadAppState(pool) {
   }
 }
 
-/** HR bootstrap: jobs, talent pool, audit — candidates via paginated /api/candidates. */
+/** HR bootstrap: jobs, audit, talent pool count — list via GET /api/talent-pool. */
 async function loadAppStateForHr(pool) {
   const client = await pool.connect();
   try {
     const meta = await loadMeta(client);
     const jobs = await loadJobs(client);
-    const talentPool = await loadTalentPool(client);
     const auditLog = await loadAudit(client);
-    return { jobs, candidates: [], talentPool, auditLog, meta };
+    const totalRes = await client.query(
+      "SELECT COUNT(*)::int AS total FROM talent_pool_entry",
+    );
+    const talentPoolMeta = { total: totalRes.rows[0]?.total ?? 0 };
+    return { jobs, candidates: [], talentPoolMeta, auditLog, meta };
   } finally {
     client.release();
   }
@@ -1307,32 +1725,39 @@ async function writeAuditFromClient(client, auditLog) {
   }
 }
 
-/** Persist jobs, talent pool, audit only — never truncates candidate/application data. */
+/** Persist jobs, audit, and optionally talent pool — never truncates candidate/application data. */
 async function saveHrShellStateOnce(pool, body) {
   const jobs = body.jobs || [];
+  const syncTalentPool = body.talentPool !== undefined;
   const talentPool = body.talentPool || [];
   const auditLog = body.auditLog || [];
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const talentCvKeys = await loadTalentCvKeys(client);
+    const talentCvKeys = syncTalentPool
+      ? await loadTalentCvKeys(client)
+      : null;
 
     /* Do NOT TRUNCATE job — CASCADE would wipe candidate/application/transcript tables. */
     await client.query("TRUNCATE TABLE audit_event RESTART IDENTITY");
-    await client.query(`
-      TRUNCATE TABLE
-        talent_pool_job_mapping,
-        talent_pool_skill,
-        talent_pool_desired_role,
-        talent_pool_cv_file,
-        talent_pool_entry
-      RESTART IDENTITY CASCADE
-    `);
+    if (syncTalentPool) {
+      await client.query(`
+        TRUNCATE TABLE
+          talent_pool_job_mapping,
+          talent_pool_skill,
+          talent_pool_desired_role,
+          talent_pool_cv_file,
+          talent_pool_entry
+        RESTART IDENTITY CASCADE
+      `);
+    }
 
     await writeJobsFromClient(client, jobs);
     await pruneJobsNotInClient(client, jobs);
-    await writeTalentPoolFromClient(client, talentPool, talentCvKeys);
+    if (syncTalentPool) {
+      await writeTalentPoolFromClient(client, talentPool, talentCvKeys);
+    }
     await writeAuditFromClient(client, auditLog);
 
     await client.query("COMMIT");
@@ -1611,13 +2036,14 @@ async function insertTalentPoolEntry(client, t, existingS3Key) {
       ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
       : null;
   const entryId = t.id || `TP-${Date.now()}`;
+  const submittedAsGuest = Boolean(t.submittedAsGuest);
   try {
     await client.query(
       `INSERT INTO talent_pool_entry (
          id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
          qualification, current_ctc, current_employer, source, application_date, cooling_period,
-         preferred_city_1, preferred_city_2, preferred_city_3
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+         preferred_city_1, preferred_city_2, preferred_city_3, submitted_as_guest
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
       [
         entryId,
         linkedId,
@@ -1639,6 +2065,7 @@ async function insertTalentPoolEntry(client, t, existingS3Key) {
         t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
         t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
         t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
+        submittedAsGuest,
       ],
     );
   } catch (e) {
@@ -1880,7 +2307,7 @@ async function applyToJob(pool, candidateId, { jobId, cv, cvFile }) {
   return { candidate, applicationId };
 }
 
-async function patchCandidateFromClient(client, c, passMap, { existingS3Key } = {}) {
+async function patchCandidateFromClient(client, c, passMap, { existingS3Key, hrId } = {}) {
   const prev = await client.query(
     "SELECT id, password_hash FROM candidate WHERE id = $1",
     [c.id],
@@ -1932,7 +2359,7 @@ async function patchCandidateFromClient(client, c, passMap, { existingS3Key } = 
   if (clientApps.length > 0 || !dbHasApps) {
     const keptIds = [];
     for (const a of clientApps) {
-      const dbId = await upsertApplicationRow(client, c.id, a);
+      const dbId = await upsertApplicationRow(client, c.id, a, hrId);
       keptIds.push(dbId);
       insertedApps.push({
         dbId,
@@ -2026,7 +2453,7 @@ async function patchCandidateFromClient(client, c, passMap, { existingS3Key } = 
   }
 }
 
-async function saveOneCandidate(pool, candidateId, candidateData) {
+async function saveOneCandidate(pool, candidateId, candidateData, { hrId } = {}) {
   if (!candidateData || String(candidateData.id) !== String(candidateId)) {
     const err = new Error("Forbidden");
     err.status = 403;
@@ -2060,6 +2487,7 @@ async function saveOneCandidate(pool, candidateId, candidateData) {
     ]);
     await patchCandidateFromClient(client, candidateData, passMap, {
       existingS3Key,
+      hrId,
     });
     await client.query("COMMIT");
     return { ok: true };
@@ -2290,8 +2718,11 @@ async function findCandidateByEmail(pool, email) {
   return r.rows[0].id;
 }
 
-async function patchCandidateForHr(pool, candidateId, candidateData) {
-  await saveOneCandidate(pool, candidateId, candidateData);
+async function patchCandidateForHr(pool, candidateId, candidateData, { hrId } = {}) {
+  await saveOneCandidate(pool, candidateId, candidateData, { hrId });
+  void notifyPendingHrDecisionEmailsForCandidate(pool, candidateId).catch((err) =>
+    console.error("[hr-decision-email]", candidateId, err),
+  );
   return getCandidateMe(pool, candidateId);
 }
 
@@ -2433,6 +2864,262 @@ async function mapTalentPoolToJob(pool, { talentPoolId, jobId, hrId }) {
   }
 }
 
+async function exportCandidatesReport(pool, { status, search }) {
+  const metaRow = await pool.query(
+    "SELECT cooling_period_months FROM organization_setting WHERE singleton = 1",
+  );
+  const coolingMonths = metaRow.rows[0]?.cooling_period_months ?? 3;
+
+  const params = [];
+  const where = [];
+  if (status) {
+    params.push(status);
+    where.push(`c.status = $${params.length}`);
+  }
+  if (search) {
+    params.push(`%${String(search).toLowerCase()}%`);
+    where.push(
+      `(lower(c.name) LIKE $${params.length} OR lower(c.email) LIKE $${params.length})`,
+    );
+  }
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  const exportSql = `
+    SELECT
+      c.name AS candidate_name,
+      c.email AS candidate_email,
+      c.status AS candidate_status,
+      c.from_talent_pool,
+      a.id AS application_id,
+      a.job_id,
+      a.applied_at,
+      a.interview_scheduled_at,
+      a.interview_completed_at,
+      a.interview_completion_status,
+      a.reattempt_request_status,
+      a.hr_decision_status,
+      a.hr_decision_at,
+      a.ai_analysis_json,
+      j.title AS job_title,
+      tp.phone AS tp_phone,
+      tp.qualification AS tp_qualification,
+      tp.location AS tp_location,
+      tp.preferred_city_1 AS tp_preferred_city_1,
+      tp.preferred_city_2 AS tp_preferred_city_2,
+      tp.preferred_city_3 AS tp_preferred_city_3,
+      tp.experience_years AS tp_experience_years,
+      tp.current_ctc AS tp_current_ctc,
+      tp.current_employer AS tp_current_employer,
+      tp.source AS tp_source,
+      hu.display_name AS hr_spoc_name,
+      COALESCE(ia_cnt.n, 0)::int AS attempt_count,
+      COALESCE(ia_dur.total_seconds, 0)::int AS total_duration_seconds,
+      EXISTS (
+        SELECT 1 FROM transcript_line tl
+        WHERE tl.candidate_id = c.id
+          AND (tl.application_id = a.id OR tl.application_id IS NULL)
+      ) AS has_transcript,
+      EXISTS (
+        SELECT 1 FROM interview_answers ans WHERE ans.application_id = a.id
+      ) AS has_voice_interview,
+      ca.tech_score,
+      ca.comm_score,
+      ca.recommendation_label
+    FROM candidate c
+    INNER JOIN application a ON a.candidate_id = c.id
+    LEFT JOIN job j ON j.id = a.job_id
+    LEFT JOIN LATERAL (
+      SELECT phone, qualification, location, experience_years, current_ctc, current_employer, source,
+             preferred_city_1, preferred_city_2, preferred_city_3
+      FROM talent_pool_entry
+      WHERE linked_candidate_id = c.id
+      ORDER BY submitted_at DESC NULLS LAST
+      LIMIT 1
+    ) tp ON true
+    LEFT JOIN hr_user hu ON hu.hr_id = a.hr_decided_by_hr_id
+    LEFT JOIN LATERAL (
+      SELECT COUNT(*)::int AS n FROM interview_attempts ia WHERE ia.application_id = a.id
+    ) ia_cnt ON true
+    LEFT JOIN LATERAL (
+      SELECT COALESCE(SUM(duration_seconds), 0)::bigint AS total_seconds
+      FROM interview_answers ans WHERE ans.application_id = a.id
+    ) ia_dur ON true
+    LEFT JOIN candidate_analysis ca ON ca.candidate_id = c.id
+    ${whereSql}
+    ORDER BY c.created_at DESC, a.applied_at DESC`;
+
+  let rows;
+  try {
+    const r = await pool.query(exportSql, params);
+    rows = r.rows;
+  } catch (e) {
+    if (e.code !== "42703" && e.code !== "42P01") throw e;
+    const fallbackSql = `
+      SELECT
+        c.name AS candidate_name,
+        c.email AS candidate_email,
+        c.status AS candidate_status,
+        c.from_talent_pool,
+        a.id AS application_id,
+        a.job_id,
+        a.applied_at,
+        a.interview_scheduled_at,
+        a.interview_completed_at,
+        a.interview_completion_status,
+        a.reattempt_request_status,
+        a.hr_decision_status,
+        NULL::timestamptz AS hr_decision_at,
+        a.ai_analysis_json,
+        j.title AS job_title,
+        tp.phone AS tp_phone,
+        tp.qualification AS tp_qualification,
+        tp.location AS tp_location,
+        tp.preferred_city_1 AS tp_preferred_city_1,
+        tp.preferred_city_2 AS tp_preferred_city_2,
+        tp.preferred_city_3 AS tp_preferred_city_3,
+        tp.experience_years AS tp_experience_years,
+        tp.current_ctc AS tp_current_ctc,
+        tp.current_employer AS tp_current_employer,
+        tp.source AS tp_source,
+        NULL::varchar AS hr_spoc_name,
+        0::int AS attempt_count,
+        0::int AS total_duration_seconds,
+        EXISTS (
+          SELECT 1 FROM transcript_line tl WHERE tl.candidate_id = c.id
+        ) AS has_transcript,
+        false AS has_voice_interview,
+        ca.tech_score,
+        ca.comm_score,
+        ca.recommendation_label
+      FROM candidate c
+      INNER JOIN application a ON a.candidate_id = c.id
+      LEFT JOIN job j ON j.id = a.job_id
+      LEFT JOIN LATERAL (
+        SELECT phone, qualification, location, experience_years, current_ctc, current_employer, source,
+               preferred_city_1, preferred_city_2, preferred_city_3
+        FROM talent_pool_entry
+        WHERE linked_candidate_id = c.id
+        ORDER BY submitted_at DESC NULLS LAST
+        LIMIT 1
+      ) tp ON true
+      LEFT JOIN candidate_analysis ca ON ca.candidate_id = c.id
+      ${whereSql}
+      ORDER BY c.created_at DESC, a.applied_at DESC`;
+    const r = await pool.query(fallbackSql, params);
+    rows = r.rows;
+  }
+
+  let guestRows = [];
+  if (shouldIncludeGuestTalentPoolExport(status)) {
+    const tpParams = [];
+    const tpWhere = ["e.submitted_as_guest = TRUE"];
+    tpWhere.push(`NOT EXISTS (
+      SELECT 1 FROM application a
+      INNER JOIN candidate c ON c.id = a.candidate_id
+      WHERE lower(c.email) = lower(e.email)
+         OR (e.linked_candidate_id IS NOT NULL AND c.id = e.linked_candidate_id)
+    )`);
+    if (search) {
+      tpParams.push(`%${String(search).toLowerCase()}%`);
+      tpWhere.push(
+        `(lower(e.name) LIKE $${tpParams.length} OR lower(e.email) LIKE $${tpParams.length})`,
+      );
+    }
+    const tpWhereSql = `WHERE ${tpWhere.join(" AND ")}`;
+    const guestSql = `
+      SELECT
+        e.name AS candidate_name,
+        e.email AS candidate_email,
+        e.phone AS tp_phone,
+        e.qualification AS tp_qualification,
+        e.location AS tp_location,
+        e.preferred_city_1 AS tp_preferred_city_1,
+        e.preferred_city_2 AS tp_preferred_city_2,
+        e.preferred_city_3 AS tp_preferred_city_3,
+        e.experience_years AS tp_experience_years,
+        e.current_ctc AS tp_current_ctc,
+        e.current_employer AS tp_current_employer,
+        e.source AS tp_source,
+        e.cooling_period AS tp_cooling_period,
+        COALESCE(e.application_date, e.submitted_at) AS applied_at,
+        (
+          SELECT string_agg(dr.role_name, ', ' ORDER BY dr.role_name)
+          FROM talent_pool_desired_role dr
+          WHERE dr.talent_pool_id = e.id
+        ) AS job_title
+      FROM talent_pool_entry e
+      ${tpWhereSql}
+      ORDER BY e.submitted_at DESC, e.id DESC`;
+    try {
+      const tpRes = await pool.query(guestSql, tpParams);
+      guestRows = tpRes.rows;
+    } catch (e) {
+      if (e.code !== "42703") throw e;
+      guestRows = [];
+    }
+  }
+
+  const exportedEmails = new Set(
+    rows.map((r) => String(r.candidate_email || "").trim().toLowerCase()).filter(Boolean),
+  );
+  guestRows = guestRows.filter(
+    (r) => !exportedEmails.has(String(r.candidate_email || "").trim().toLowerCase()),
+  );
+
+  return buildCandidateExportCsv({
+    applicationRows: rows,
+    guestRows,
+    coolingMonths,
+  });
+}
+
+async function exportTalentPoolReport(
+  pool,
+  { role, skill, minExp, maxExp, location, source, keyword, fromDate, toDate },
+) {
+  const { whereSql, params } = buildTalentPoolFilterWhere({
+    role,
+    skill,
+    minExp,
+    maxExp,
+    location,
+    source,
+    keyword,
+    fromDate,
+    toDate,
+  });
+  const sql = `
+    SELECT
+      e.name AS candidate_name,
+      e.email AS candidate_email,
+      e.phone AS tp_phone,
+      e.qualification AS tp_qualification,
+      e.location AS tp_location,
+      e.preferred_city_1 AS tp_preferred_city_1,
+      e.preferred_city_2 AS tp_preferred_city_2,
+      e.preferred_city_3 AS tp_preferred_city_3,
+      e.experience_years AS tp_experience_years,
+      e.current_ctc AS tp_current_ctc,
+      e.current_employer AS tp_current_employer,
+      e.source AS tp_source,
+      e.cooling_period AS tp_cooling_period,
+      COALESCE(e.application_date, e.submitted_at) AS applied_at,
+      (
+        SELECT string_agg(dr.role_name, ', ' ORDER BY dr.role_name)
+        FROM talent_pool_desired_role dr
+        WHERE dr.talent_pool_id = e.id
+      ) AS job_title
+    FROM talent_pool_entry e
+    ${whereSql}
+    ORDER BY e.submitted_at DESC, e.id DESC`;
+  const r = await pool.query(sql, params);
+  return buildCandidateExportCsv({
+    applicationRows: [],
+    guestRows: r.rows,
+    coolingMonths: 3,
+  });
+}
+
 module.exports = {
   loadAppState,
   loadAppStateForHr,
@@ -2440,8 +3127,13 @@ module.exports = {
   saveOneCandidate,
   patchCandidateForHr,
   submitTalentPoolEntry,
+  countTalentPool,
+  getTalentPoolById,
+  listTalentPoolPaginated,
+  exportTalentPoolReport,
   listCandidatesPaginated,
   listCandidateStats,
+  exportCandidatesReport,
   findCandidateByEmail,
   bulkUpdateCandidateStatus,
   mapTalentPoolToJob,

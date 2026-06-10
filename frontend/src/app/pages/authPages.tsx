@@ -15,6 +15,17 @@ import { ConsentScreen } from "@/features/auth/components/ConsentScreen";
 import { CandReg } from "@/features/auth/components/CandRegForm";
 import { CVUpload } from "@/features/apply/components/CVUpload";
 import { useAppState } from "@/app/state/AppStateProvider";
+import { SS_PENDING_JOB_APPLY } from "@/constants/storageKeys";
+
+function readPendingGuestJobApply() {
+  try {
+    const raw = sessionStorage.getItem(SS_PENDING_JOB_APPLY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
 
 export function LoginPage() {
   const {
@@ -26,6 +37,7 @@ export function LoginPage() {
     setSelJob,
     syncStateFromServer,
     candidateLoginPreferHomeRef,
+    finalizeGuestJobApply,
   } = useAppState();
 
   return (
@@ -41,6 +53,7 @@ export function LoginPage() {
         try {
           await syncStateFromServer();
         } catch (e) {}
+        if (await finalizeGuestJobApply()) return;
         const preferHome = candidateLoginPreferHomeRef.current;
         candidateLoginPreferHomeRef.current = false;
         const sp = new URLSearchParams(window.location.search);
@@ -100,6 +113,9 @@ export function RegisterPage() {
     setSelJob,
     setTalentPool,
     syncStateFromServer,
+    finalizeGuestJobApply,
+    clearGuestJobApply,
+    guestJobApplyRef,
   } = useAppState();
 
   useEffect(() => {
@@ -119,6 +135,13 @@ export function RegisterPage() {
         onDecline={() => {
           if (tpGuestEntryRef.current) {
             navigate("/talent-pool");
+            return;
+          }
+          const pendingApply =
+            guestJobApplyRef.current || readPendingGuestJobApply();
+          if (pendingApply?.jobId) {
+            clearGuestJobApply();
+            navigate("/jobs/" + pendingApply.jobId + "/apply");
             return;
           }
           const sp = new URLSearchParams(window.location.search);
@@ -172,6 +195,7 @@ export function RegisterPage() {
               ...tpPending,
               candidateId: data.candidateId,
               id: tpPending.id || "TP-" + Date.now(),
+              submittedAsGuest: true,
             };
             try {
               await fetch(
@@ -187,6 +211,7 @@ export function RegisterPage() {
             navigate("/talent-pool/done");
             return;
           }
+          if (await finalizeGuestJobApply()) return;
           const preferHome = candidateLoginPreferHomeRef.current;
           candidateLoginPreferHomeRef.current = false;
           const sp = new URLSearchParams(window.location.search);
@@ -210,6 +235,12 @@ export function RegisterPage() {
           navigate("/talent-pool");
           return;
         }
+        const pendingApply =
+          guestJobApplyRef.current || readPendingGuestJobApply();
+        if (pendingApply?.jobId) {
+          navigate("/jobs/" + pendingApply.jobId + "/apply");
+          return;
+        }
         const sp = new URLSearchParams(window.location.search);
         const r = sp.get("returnTo");
         navigate("/login" + (r ? "?returnTo=" + encodeURIComponent(r) : ""));
@@ -225,7 +256,9 @@ export function ApplyPage() {
     selJob,
     setSelJob,
     maxCvMb,
+    authCandidate,
     handleCVUploaded,
+    handleGuestCVUploaded,
     navigate,
     storageReady,
   } = useAppState();
@@ -243,7 +276,8 @@ export function ApplyPage() {
     <CVUpload
       jobTitle={job.title}
       maxCvMb={maxCvMb}
-      onComplete={handleCVUploaded}
+      submitLabel={authCandidate ? undefined : "Continue to sign in →"}
+      onComplete={authCandidate ? handleCVUploaded : handleGuestCVUploaded}
       onBack={() => {
         navigate("/");
         setSelJob(null);

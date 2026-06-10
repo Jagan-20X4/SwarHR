@@ -7,11 +7,30 @@ import {
   applicationEligibleForTechnicalReattemptRequest,
   applicationHasReattemptHistory,
   getCoolingStatus,
+  interviewStartSlotStatus,
+  formatInterviewCountdown,
+  INTERVIEW_SLOT_CLOSED_MESSAGE,
 } from "@/legacy/helpersModule";
 export function Jobs({ jobs, applicationHistory = [], onApply, onContinueInterview, onReattemptPortal, onTalentPool, onBack, coolingMonths, showBack = true, authCandidate = false, onTalentPoolPortal, jobBoardAuth, authStripReady = false, scheduleFlash = null }) {
   const [q, setQ] = useState("");
+  const [clockTick, setClockTick] = useState(0);
   const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
   const f = jobs.filter(j => j.title.toLowerCase().includes(q.toLowerCase()) || j.location.toLowerCase().includes(q.toLowerCase()));
+  const hasScheduledCountdown = authCandidate && f.some((j) => {
+    const app = getLatestAppForJob(applicationHistory, j.id);
+    if (!app?.interviewScheduledAt || app.interviewCompletedAt) return false;
+    return interviewStartSlotStatus(app.interviewScheduledAt, false).tooEarly;
+  });
+  const hasPendingScheduledSlot = authCandidate && f.some((j) => {
+    const app = getLatestAppForJob(applicationHistory, j.id);
+    return app?.interviewScheduledAt && !app.interviewCompletedAt;
+  });
+  useEffect(() => {
+    if (!hasScheduledCountdown && !hasPendingScheduledSlot) return undefined;
+    const id = setInterval(() => setClockTick((x) => x + 1), 1000);
+    return () => clearInterval(id);
+  }, [hasScheduledCountdown, hasPendingScheduledSlot]);
+  void clockTick;
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between flex-wrap gap-2">
@@ -43,9 +62,13 @@ export function Jobs({ jobs, applicationHistory = [], onApply, onContinueIntervi
           let showApplied = false;
           let doApply = false;
           let showContinue = false;
+          let showCountdown = false;
+          let countdownLabel = null;
+          let showSlotClosed = false;
           let locked = false;
           let extraCoolingLine = null;
           const personal = authCandidate;
+          const latestAppForJob = personal ? getLatestAppForJob(applicationHistory, j.id) : null;
           if (personal && j.userStatus === "cooling") {
             locked = true;
             coolingDays = j.coolingDaysLeft;
@@ -71,8 +94,30 @@ export function Jobs({ jobs, applicationHistory = [], onApply, onContinueIntervi
               doApply = true;
             }
           }
+          if (personal && !locked && latestAppForJob && !latestAppForJob.interviewCompletedAt) {
+            doApply = false;
+            showApplied = false;
+            showContinue = false;
+            showCountdown = false;
+            countdownLabel = null;
+            showSlotClosed = false;
+            const schedAt = latestAppForJob.interviewScheduledAt;
+            if (schedAt) {
+              const slot = interviewStartSlotStatus(schedAt, false);
+              const cd = slot.tooEarly ? formatInterviewCountdown(schedAt) : null;
+              if (slot.tooLate) {
+                showSlotClosed = true;
+              } else if (cd) {
+                showCountdown = true;
+                countdownLabel = cd;
+              } else if (!slot.blocked) {
+                showContinue = true;
+              }
+            } else {
+              showContinue = true;
+            }
+          }
           const dim = locked || showApplied;
-          const latestAppForJob = personal ? getLatestAppForJob(applicationHistory, j.id) : null;
           const showReattemptPortal =
             personal &&
             typeof onReattemptPortal === "function" &&
@@ -95,11 +140,20 @@ export function Jobs({ jobs, applicationHistory = [], onApply, onContinueIntervi
                 {scheduleFlash && scheduleFlash.jobId === j.id && scheduleFlash.rescheduled ? (
                   <p className="text-xs font-semibold text-indigo-700 mt-1">* Rescheduled to {fmtDateTime(scheduleFlash.at)}</p>
                 ) : null}
+                {showSlotClosed ? (
+                  <p className="text-xs font-semibold text-amber-800 mt-2">{INTERVIEW_SLOT_CLOSED_MESSAGE}</p>
+                ) : null}
                 {extraCoolingLine}
               </div>
               <div className="shrink-0 flex flex-col items-end gap-2">
+                {showCountdown ? (
+                  <button type="button" disabled className="px-5 py-2 bg-slate-200 text-slate-600 font-bold rounded-xl text-sm cursor-not-allowed whitespace-nowrap">Starts in {countdownLabel}</button>
+                ) : null}
+                {showSlotClosed ? (
+                  <p className="px-4 py-2 max-w-[14rem] text-right text-xs font-semibold text-amber-800 leading-snug">{INTERVIEW_SLOT_CLOSED_MESSAGE}</p>
+                ) : null}
                 {doApply ? <button type="button" onClick={() => onApply(j)} className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-xl text-sm">Apply</button> : null}
-                {showContinue ? (
+                {showContinue && !showSlotClosed ? (
                   <button type="button" onClick={() => onContinueInterview(j)} className="px-5 py-2 bg-teal-600 hover:bg-teal-500 text-white font-bold rounded-xl text-sm">Continue interview →</button>
                 ) : null}
                 {showReattemptPortal ? (

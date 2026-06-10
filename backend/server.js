@@ -17,7 +17,6 @@ const {
   loadAppStateForHr,
   saveAppState,
   saveOneCandidate,
-  submitTalentPoolEntry,
   verifyCandidateLogin,
   verifyHrLogin,
   listJobsApi,
@@ -29,10 +28,18 @@ const {
 } = require("./stateRepo");
 const { createCvAnalyserRouter } = require("./routes/cvAnalyser");
 const {
+  sendIntroInterviewEmail,
+  sendScheduledInterviewEmail,
+  sendInterviewCompletionEmail,
+  processInterviewReminders,
+  processInterviewMissedSlots,
+} = require("./lib/interviewEmailService");
+const {
   createVoiceBotRouter,
   createAdminInterviewRouter,
 } = require("./routes/interviewVoice");
 const { createCandidatesRouter } = require("./routes/candidates");
+const { createTalentPoolRouter } = require("./routes/talentPool");
 const { createAttachmentsRouter } = require("./routes/attachments");
 const { rateLimit } = require("./lib/rateLimit");
 const { isS3Configured } = require("./lib/s3Attachments");
@@ -284,6 +291,89 @@ app.post(
   },
 );
 
+app.post(
+  "/api/me/interview-email/intro",
+  dbReady,
+  requireCandidate,
+  rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-intro" }),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+      if (!jobId) {
+        res.status(400).json({ error: "jobId required" });
+        return;
+      }
+      const applicationId =
+        body.applicationId != null ? Number(body.applicationId) : null;
+      const out = await sendIntroInterviewEmail(pool, req.candidateId, {
+        jobId,
+        applicationId: Number.isFinite(applicationId) ? applicationId : null,
+      });
+      res.json(out);
+    } catch (e) {
+      console.error(e);
+      sendApiError(res, e);
+    }
+  },
+);
+
+app.post(
+  "/api/me/interview-email/scheduled",
+  dbReady,
+  requireCandidate,
+  rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-sched" }),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+      const scheduledAt = body.scheduledAt != null ? String(body.scheduledAt) : "";
+      if (!jobId || !scheduledAt) {
+        res.status(400).json({ error: "jobId and scheduledAt required" });
+        return;
+      }
+      const applicationId =
+        body.applicationId != null ? Number(body.applicationId) : null;
+      const out = await sendScheduledInterviewEmail(pool, req.candidateId, {
+        jobId,
+        applicationId: Number.isFinite(applicationId) ? applicationId : null,
+        scheduledAt,
+      });
+      res.json(out);
+    } catch (e) {
+      console.error(e);
+      sendApiError(res, e);
+    }
+  },
+);
+
+app.post(
+  "/api/me/interview-email/completed",
+  dbReady,
+  requireCandidate,
+  rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-done" }),
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+      if (!jobId) {
+        res.status(400).json({ error: "jobId required" });
+        return;
+      }
+      const applicationId =
+        body.applicationId != null ? Number(body.applicationId) : null;
+      const out = await sendInterviewCompletionEmail(pool, req.candidateId, {
+        jobId,
+        applicationId: Number.isFinite(applicationId) ? applicationId : null,
+      });
+      res.json(out);
+    } catch (e) {
+      console.error(e);
+      sendApiError(res, e);
+    }
+  },
+);
+
 app.use("/api/candidates", dbReady, createCandidatesRouter({ pool }));
 app.use(
   "/api/attachments",
@@ -291,22 +381,10 @@ app.use(
   createAttachmentsRouter({ pool }),
 );
 
-app.post(
+app.use(
   "/api/talent-pool",
   dbReady,
-  rateLimit({ windowMs: 60_000, max: 10, keySuffix: "talent-pool" }),
-  async (req, res) => {
-    try {
-      const cand = bearerCandidateId(req);
-      const out = await submitTalentPoolEntry(pool, req.body || {}, {
-        candidateId: cand || undefined,
-      });
-      res.status(201).json(out);
-    } catch (e) {
-      console.error(e);
-      sendApiError(res, e);
-    }
-  },
+  createTalentPoolRouter({ pool }),
 );
 
 app.use(
@@ -586,8 +664,32 @@ app.post(
 assertJwtSecretForProduction();
 assertVoiceBotServiceTokenConfigured();
 
+const INTERVIEW_REMINDER_POLL_MS = Number(
+  process.env.INTERVIEW_REMINDER_POLL_MS || 60_000,
+);
+
+function startInterviewReminderPoller() {
+  const tick = () => {
+    processInterviewReminders(pool).catch((err) => {
+      console.error("[reminder] poll failed:", err.message || err);
+    });
+    processInterviewMissedSlots(pool).catch((err) => {
+      console.error("[missed] poll failed:", err.message || err);
+    });
+  };
+  setInterval(tick, INTERVIEW_REMINDER_POLL_MS);
+  setTimeout(tick, 5_000);
+}
+
 app.listen(PORT, () => {
   console.log(`SwarHR backend http://localhost:${PORT}`);
+  startInterviewReminderPoller();
+  console.log(
+    `Interview reminder emails: polling every ${INTERVIEW_REMINDER_POLL_MS / 1000}s (30 min before slot)`,
+  );
+  console.log(
+    `Interview missed emails: polling every ${INTERVIEW_REMINDER_POLL_MS / 1000}s (after slot + grace)`,
+  );
   console.log(`POST ${"/api/messages".padEnd(20)} → ${UPSTREAM} (HR auth)`);
   console.log(
     `POST ${"/api/interview/messages".padEnd(20)} → ${UPSTREAM} (candidate interview)`,

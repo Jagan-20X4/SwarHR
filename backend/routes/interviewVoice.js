@@ -12,6 +12,15 @@ const {
   interviewAnswersRequireAttemptId,
 } = require("../lib/interviewAttempts");
 const { markApplicationInterviewComplete } = require("../lib/interviewFinalize");
+const {
+  sendInterviewCompletionEmail,
+  sendReattemptApprovedEmail,
+  sendReattemptRejectedEmail,
+} = require("../lib/interviewEmailService");
+const {
+  reattemptDeadlineExpired,
+  REATTEMPT_DEADLINE_EXPIRED_MESSAGE,
+} = require("../lib/reattemptDeadline");
 
 function auditId() {
   return `AUD-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
@@ -286,6 +295,7 @@ function createVoiceBotRouter(pool) {
       const shouldFinalize =
         finalizeInterview === true && answered >= expected;
 
+      let interviewFinalized = false;
       if (shouldFinalize) {
         try {
           const up = await client.query(
@@ -328,9 +338,18 @@ function createVoiceBotRouter(pool) {
           clearReattempt: true,
         });
         await completeInterviewAttempt(client, attemptId);
+        interviewFinalized = true;
       }
 
       await client.query("COMMIT");
+      if (interviewFinalized && appRow.job_id) {
+        void sendInterviewCompletionEmail(pool, appRow.candidate_id, {
+          jobId: appRow.job_id,
+          applicationId: appId,
+        }).catch((err) => {
+          console.error("Completion interview email failed:", err.message || err);
+        });
+      }
       res.json({
         ok: true,
         answered,
@@ -355,17 +374,37 @@ function createVoiceBotRouter(pool) {
     }
     const client = await pool.connect();
     try {
-      const appRes = await client.query(
-        "SELECT id, candidate_id, interview_completion_status, reattempt_request_status FROM application WHERE id = $1",
-        [applicationId],
-      );
-      if (appRes.rows.length === 0) {
-        res.status(404).json({ error: "Application not found" });
-        return;
+      let row;
+      try {
+        const appRes = await client.query(
+          `SELECT id, candidate_id, interview_completion_status, reattempt_request_status,
+                  interview_completed_at, reattempt_resolved_at, reattempt_hr_reason_code
+           FROM application WHERE id = $1`,
+          [applicationId],
+        );
+        if (appRes.rows.length === 0) {
+          res.status(404).json({ error: "Application not found" });
+          return;
+        }
+        row = appRes.rows[0];
+      } catch (e) {
+        if (e.code !== "42703") throw e;
+        const appRes = await client.query(
+          "SELECT id, candidate_id, interview_completion_status, reattempt_request_status FROM application WHERE id = $1",
+          [applicationId],
+        );
+        if (appRes.rows.length === 0) {
+          res.status(404).json({ error: "Application not found" });
+          return;
+        }
+        row = appRes.rows[0];
       }
-      const row = appRes.rows[0];
       if (!req.voiceBotService && row.candidate_id !== req.candidateId) {
         res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      if (reattemptDeadlineExpired(row)) {
+        res.status(403).json({ error: REATTEMPT_DEADLINE_EXPIRED_MESSAGE });
         return;
       }
       try {
@@ -764,6 +803,15 @@ function createAdminInterviewRouter(pool) {
           ],
         );
         await client.query("COMMIT");
+        if (decision === "approve") {
+          void sendReattemptApprovedEmail(pool, applicationId).catch((err) =>
+            console.error("[reattempt-email]", applicationId, "approve", err),
+          );
+        } else {
+          void sendReattemptRejectedEmail(pool, applicationId).catch((err) =>
+            console.error("[reattempt-email]", applicationId, "reject", err),
+          );
+        }
         res.json({ ok: true, applicationId, decision });
       } catch (e) {
         await client.query("ROLLBACK");

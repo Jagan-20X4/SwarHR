@@ -4,6 +4,7 @@ const { requireHr } = require("../middleware/auth");
 const {
   listCandidatesPaginated,
   listCandidateStats,
+  exportCandidatesReport,
   getCandidateMe,
   patchCandidateForHr,
   bulkUpdateCandidateStatus,
@@ -79,6 +80,29 @@ function createCandidatesRouter({ pool }) {
     }
   });
 
+  router.get("/export", requireHr, async (req, res) => {
+    try {
+      const status =
+        req.query.status != null ? String(req.query.status).trim() : "";
+      const search =
+        req.query.search != null ? String(req.query.search).trim() : "";
+      const csv = await exportCandidatesReport(pool, {
+        status: status || undefined,
+        search: search || undefined,
+      });
+      const stamp = new Date().toISOString().slice(0, 10);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="candidate-report-${stamp}.csv"`,
+      );
+      res.send(csv);
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
+  });
+
   router.get("/:id", requireHr, async (req, res) => {
     try {
       const candidate = await getCandidateMe(pool, req.params.id);
@@ -96,7 +120,9 @@ function createCandidatesRouter({ pool }) {
   router.patch("/:id", requireHr, async (req, res) => {
     try {
       const body = req.body?.candidate ?? req.body ?? {};
-      const updated = await patchCandidateForHr(pool, req.params.id, body);
+      const updated = await patchCandidateForHr(pool, req.params.id, body, {
+        hrId: req.hrId,
+      });
       res.json(updated);
     } catch (e) {
       console.error(e);

@@ -14,6 +14,7 @@ const {
   analyzeCvWithClaudePdfBufferForJob,
   generateJobDraftClaude,
 } = require("../lib/anthropicClient");
+const { sendCvAnalyserInviteEmail } = require("../lib/interviewEmailService");
 
 const rateBuckets = new Map();
 
@@ -701,6 +702,45 @@ No machine-readable CV body was extracted (common for infographic or image-heavy
       'attachment; filename="cv-analyser-export.csv"',
     );
     res.send(lines.join("\r\n"));
+  });
+
+  router.post("/send-invite", requireHR, async (req, res) => {
+    const candidateName = String(req.body?.candidateName || "").trim();
+    const email = String(req.body?.email || "").trim();
+    const jobTitle = String(req.body?.jobTitle || "").trim();
+    const recruitmentJobId = String(req.body?.recruitmentJobId || "").trim();
+    if (!email) {
+      res.status(400).json({ error: "Email is required to send invite" });
+      return;
+    }
+    if (!recruitmentJobId) {
+      res.status(400).json({
+        error: "Link a careers job in Job Master before sending invite",
+      });
+      return;
+    }
+    try {
+      const out = await sendCvAnalyserInviteEmail({
+        candidateName,
+        email,
+        jobTitle,
+        recruitmentJobId,
+      });
+      if (out.skipped) {
+        const msg =
+          out.reason === "disabled"
+            ? "Email is not configured on the server"
+            : out.reason === "no_email"
+              ? "Email is required to send invite"
+              : "Could not send invite email";
+        res.status(400).json({ error: msg });
+        return;
+      }
+      res.json({ ok: true, email });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    }
   });
 
   return router;

@@ -30,7 +30,6 @@ export function HrLayout() {
 export function HrDashboardPage() {
   const {
     jobs,
-    talentPool,
     reattemptPendingCount,
     setActiveId,
     setSelJob,
@@ -45,7 +44,6 @@ export function HrDashboardPage() {
   return (
     <HRDash
       jobs={jobs}
-      talentPool={talentPool}
       reattemptPendingCount={reattemptPendingCount}
       onView={(id) => {
         setActiveId(id);
@@ -192,7 +190,6 @@ export function HrScreeningPage() {
 
 export function HrTalentPoolPage() {
   const {
-    talentPool,
     jobs,
     candidates,
     handleTalentPoolMap,
@@ -215,7 +212,6 @@ export function HrTalentPoolPage() {
 
   return (
     <TalentPoolBrowse
-      talentPool={talentPool}
       jobs={jobs}
       candidates={candidates}
       resolveExistingByEmail={resolveExistingByEmail}

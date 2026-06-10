@@ -5,6 +5,9 @@ import {
   fmtDateTime,
   getLatestAppForJob,
   interviewEligibleForJob,
+  interviewStartSlotStatus,
+  formatInterviewCountdown,
+  INTERVIEW_SLOT_CLOSED_MESSAGE,
   applicationEligibleForTechnicalReattemptRequest,
   portalStatusLabel,
   SB,
@@ -36,6 +39,19 @@ export function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, 
   const [rrCode, setRrCode] = useState("TECH_NETWORK");
   const [rrText, setRrText] = useState("");
   const [rrBusy, setRrBusy] = useState(false);
+  const [clockTick, setClockTick] = useState(0);
+  const schedAt = latestApp?.interviewScheduledAt;
+  const schedSlot = schedAt ? interviewStartSlotStatus(schedAt, false) : null;
+  const interviewCountdown =
+    schedAt && schedSlot?.tooEarly ? formatInterviewCountdown(schedAt) : null;
+  const interviewSlotClosed =
+    schedAt && schedSlot?.tooLate && !latestApp?.interviewCompletedAt;
+  useEffect(() => {
+    if (!schedAt || latestApp?.interviewCompletedAt) return undefined;
+    const id = setInterval(() => setClockTick((x) => x + 1), 1000);
+    return () => clearInterval(id);
+  }, [schedAt, latestApp?.interviewCompletedAt]);
+  void clockTick;
   const canRequestReattempt = latestApp ? applicationEligibleForTechnicalReattemptRequest(latestApp) : false;
   const submitReattempt = async () => {
     if (!latestApp?.applicationId) return;
@@ -135,7 +151,11 @@ export function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, 
                 <button type="button" disabled={rrBusy} onClick={submitReattempt} className="w-full py-2 bg-indigo-600 text-white text-sm font-bold rounded-lg disabled:bg-slate-300">{rrBusy ? "Sending…" : "Submit request to HR"}</button>
               </div>
             ) : null}
-            {canInterviewBtn ? (
+            {canInterviewBtn && interviewSlotClosed ? (
+              <p className="w-full py-3 px-4 bg-amber-50 border border-amber-200 text-amber-900 text-sm font-semibold rounded-xl text-center leading-snug">{INTERVIEW_SLOT_CLOSED_MESSAGE}</p>
+            ) : canInterviewBtn && interviewCountdown ? (
+              <button type="button" disabled className="w-full py-3 bg-slate-200 text-slate-600 font-bold rounded-xl cursor-not-allowed">Starts in {interviewCountdown}</button>
+            ) : canInterviewBtn ? (
               <button type="button" onClick={() => onInterview(candidate.id)} className="w-full py-3 bg-indigo-600 text-white font-bold rounded-xl">🎤 Start Voice Interview →</button>
             ) : showInterviewBlock ? (
               <p className="text-xs text-slate-500 mb-2">{iv.reason}</p>
