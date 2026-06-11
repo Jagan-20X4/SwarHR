@@ -2134,6 +2134,16 @@ async function insertTalentPoolEntry(client, t, existingS3Key) {
   if (t.cvFile) {
     await persistTalentPoolCv(client, entryId, t.cvFile, existingS3Key);
   }
+  if (linkedId) {
+    try {
+      await client.query(
+        "UPDATE candidate SET from_talent_pool = TRUE, updated_at = NOW() WHERE id = $1",
+        [linkedId],
+      );
+    } catch (e) {
+      if (e.code !== "42703") throw e;
+    }
+  }
   return entryId;
 }
 
@@ -2521,6 +2531,8 @@ function mapListRowToSummary(r) {
       r.status === "SCHEDULED")
       ? "INTERVIEWED"
       : r.status;
+  const fromPoolSource = Boolean(r.from_talent_pool || r.in_talent_pool);
+  const hasActiveJob = Boolean(r.job_id);
   return {
     id: r.id,
     name: r.name,
@@ -2528,7 +2540,7 @@ function mapListRowToSummary(r) {
     status,
     jobId: r.job_id,
     consent: r.consent,
-    fromTalentPool: r.from_talent_pool,
+    fromTalentPool: fromPoolSource && !hasActiveJob,
     createdAt: r.created_at ? new Date(r.created_at).toISOString() : null,
     updatedAt: r.updated_at ? new Date(r.updated_at).toISOString() : null,
     interviewScheduledAt: sched,
@@ -2663,6 +2675,11 @@ async function listCandidatesPaginated(
   const listRes = await pool.query(
     `SELECT c.id, c.name, c.email, c.status, c.job_id, c.consent, c.from_talent_pool,
             c.created_at, c.updated_at${cvSelect},
+            EXISTS (
+              SELECT 1 FROM talent_pool_entry tp
+              WHERE tp.linked_candidate_id = c.id
+                 OR lower(tp.email) = lower(c.email)
+            ) AS in_talent_pool,
             la.interview_scheduled_at,
             la.interview_completed_at,
             la.interview_completion_status,
@@ -2864,7 +2881,7 @@ async function mapTalentPoolToJob(pool, { talentPoolId, jobId, hrId }) {
   }
 }
 
-async function exportCandidatesReport(pool, { status, search }) {
+async function exportCandidatesReport(pool, { status, search, activeJobOnly } = {}) {
   const metaRow = await pool.query(
     "SELECT cooling_period_months FROM organization_setting WHERE singleton = 1",
   );
@@ -2881,6 +2898,9 @@ async function exportCandidatesReport(pool, { status, search }) {
     where.push(
       `(lower(c.name) LIKE $${params.length} OR lower(c.email) LIKE $${params.length})`,
     );
+  }
+  if (activeJobOnly) {
+    where.push("a.job_id IS NOT NULL");
   }
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
@@ -3010,7 +3030,7 @@ async function exportCandidatesReport(pool, { status, search }) {
   }
 
   let guestRows = [];
-  if (shouldIncludeGuestTalentPoolExport(status)) {
+  if (!activeJobOnly && shouldIncludeGuestTalentPoolExport(status)) {
     const tpParams = [];
     const tpWhere = ["e.submitted_as_guest = TRUE"];
     tpWhere.push(`NOT EXISTS (

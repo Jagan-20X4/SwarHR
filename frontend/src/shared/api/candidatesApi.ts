@@ -127,10 +127,11 @@ export async function findCandidateIdByEmail(email) {
   return j.id;
 }
 
-export async function exportCandidateReport({ status, search } = {}) {
+export async function exportCandidateReport({ status, search, activeJobOnly } = {}) {
   const q = new URLSearchParams();
   if (status) q.set("status", status);
   if (search) q.set("search", search);
+  if (activeJobOnly) q.set("activeJobOnly", "1");
   const r = await fetch(`/api/candidates/export?${q}`, apiFetchInit());
   if (!r.ok) {
     const err = await r.json().catch(() => ({}));

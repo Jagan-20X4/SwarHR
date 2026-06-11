@@ -135,6 +135,7 @@ export function HRDash({
       await exportCandidateReport({
         status: filter === "ALL" ? undefined : filter,
         search: searchDebounced || undefined,
+        activeJobOnly: true,
       });
     } catch (e) {
       console.error(e);
@@ -304,7 +305,12 @@ export function HRDash({
                   </span>
                 </div>
                 <p className="text-sm font-semibold text-slate-700 mb-1">
-                  {jt(c.jobId)}
+                  {c.jobId ? jt(c.jobId) : "—"}
+                  {c.fromTalentPool ? (
+                    <span className="text-xs font-semibold text-amber-700 ml-1.5">
+                      *talent pool
+                    </span>
+                  ) : null}
                 </p>
                 {schedFor(c) ? (
                   <p className="text-xs font-bold text-teal-700 mb-2">
@@ -320,11 +326,6 @@ export function HRDash({
                   {candidateHasAnyInterviewTranscript(c) && (
                     <div className="text-xs font-bold px-2 py-1 rounded-lg bg-teal-50 text-teal-600">
                       🎤 Done
-                    </div>
-                  )}
-                  {c.fromTalentPool && (
-                    <div className="text-xs font-bold px-2 py-1 rounded-lg bg-amber-50 text-amber-700">
-                      🌟 Pool
                     </div>
                   )}
                   {(c.applicationCount > 1 ||

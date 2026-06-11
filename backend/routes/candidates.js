@@ -86,9 +86,12 @@ function createCandidatesRouter({ pool }) {
         req.query.status != null ? String(req.query.status).trim() : "";
       const search =
         req.query.search != null ? String(req.query.search).trim() : "";
+      const activeJobOnly =
+        req.query.activeJobOnly === "1" || req.query.activeJobOnly === "true";
       const csv = await exportCandidatesReport(pool, {
         status: status || undefined,
         search: search || undefined,
+        activeJobOnly,
       });
       const stamp = new Date().toISOString().slice(0, 10);
       res.setHeader("Content-Type", "text/csv; charset=utf-8");
