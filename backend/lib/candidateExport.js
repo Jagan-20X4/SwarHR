@@ -48,6 +48,7 @@ function formatReportDate(isoOrDate) {
       day: "numeric",
       month: "short",
       year: "numeric",
+      timeZone: "Asia/Kolkata",
     });
   } catch {
     return "";

@@ -176,12 +176,6 @@ export function HRDash({
             🌟 Talent Pool ({talentPoolTotal ?? "…"})
           </button>
           <button
-            onClick={onScreen}
-            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform"
-          >
-            Screen
-          </button>
-          <button
             type="button"
             onClick={onReattempts}
             className="px-3 py-1.5 bg-amber-800 hover:bg-amber-700 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform relative"

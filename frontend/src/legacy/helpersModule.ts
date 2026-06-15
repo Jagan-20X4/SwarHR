@@ -97,9 +97,9 @@ export function pickFemaleFirstSpeechVoice(langCode, voicesList) {
   if (!pool.length) pool = list.slice();
   const lower = (vo) => (vo.name || "").toLowerCase();
   const femaleHint = (n) =>
-    /\bfemale\b|\bwoman\b|\bzira\b|\bsamantha\b|\bvictoria\b|\bkaren\b|\bmoira\b|\btessa\b|\bfiona\b|\bveena\b|\blatika\b|\bgoogle\b[^\w]*female|\bmicrosoft[^\w]*female|\bnatural\b|\bpremium\b/.test(n);
+    /\bfemale\b|\bwoman\b|\bheera\b|\bkalpana\b|\blekha\b|\bzira\b|\bsamantha\b|\bvictoria\b|\bkaren\b|\bmoira\b|\btessa\b|\bfiona\b|\bveena\b|\blatika\b|\bgoogle\b[^\w]*female|\bmicrosoft[^\w]*female/.test(n);
   const maleHint = (n) =>
-    /\bmale\b|\bman\b|\bgoogle\b[^\w]*male|\bmicrosoft[^\w]*male/.test(n);
+    /\bmale\b|\bman\b|\bravi\b|\bhemant\b|\bbandal\b|\bgoogle\b[^\w]*male|\bmicrosoft[^\w]*male/.test(n);
   const score = (vo) => {
     const n = lower(vo);
     let s = 0;
@@ -286,44 +286,43 @@ export function dequeueAbandonJob(applicationId) {
   if (!Number.isFinite(aid)) return;
   writeAbandonQueue(readAbandonQueue().filter((x) => x.applicationId !== aid));
 }
-export function enqueueAbandonJob({ applicationId, clientDetail, token: tokenOpt }) {
-  const token = tokenOpt || localStorage.getItem(LS_TOKEN);
+export function enqueueAbandonJob({ applicationId, clientDetail }) {
   const aid = parseInt(String(applicationId), 10);
-  if (!token || !Number.isFinite(aid)) return;
+  if (!Number.isFinite(aid)) return;
   const q = readAbandonQueue();
   if (q.some((x) => x.applicationId === aid)) return;
   q.push({
     applicationId: aid,
     clientDetail: String(clientDetail || "").slice(0, 2000),
-    token,
     ts: Date.now(),
   });
   writeAbandonQueue(q);
 }
 /**
- * POST abandon (8s cap) → sendBeacon with token in JSON body → optional localStorage queue for `online` retry.
+ * POST abandon (8s cap) → sendBeacon → optional localStorage queue for `online` retry.
+ * Auth: HttpOnly session cookie (sent automatically on fetch and sendBeacon).
  * @param {object} [opts]
  * @param {boolean} [opts.noEnqueue] — do not enqueue on total failure (used when flushing queued items).
- * @param {string} [opts.token] — JWT (defaults to LS_TOKEN).
  */
 export async function postInterviewAbandonWithFallback(applicationId, clientDetail, opts = {}) {
-  const { noEnqueue = false, token: tokenOpt = null } = opts;
+  const { noEnqueue = false } = opts;
   const aid = parseInt(String(applicationId), 10);
   if (!Number.isFinite(aid)) return false;
   const detail = String(clientDetail || "").slice(0, 2000);
-  const token = (tokenOpt && String(tokenOpt)) || localStorage.getItem(LS_TOKEN);
-  if (!token) return false;
   const bodyJson = JSON.stringify({ applicationId: aid, clientDetail: detail });
   const ctrl = new AbortController();
   const tid = setTimeout(() => ctrl.abort(), ABANDON_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch("/api/voice-bot/interview-session-abandon", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + token },
-      body: bodyJson,
-      signal: ctrl.signal,
-      keepalive: true,
-    });
+    const res = await fetch(
+      "/api/voice-bot/interview-session-abandon",
+      apiFetchInit({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: bodyJson,
+        signal: ctrl.signal,
+        keepalive: true,
+      }),
+    );
     clearTimeout(tid);
     if (res.ok) {
       dequeueAbandonJob(aid);
@@ -333,15 +332,14 @@ export async function postInterviewAbandonWithFallback(applicationId, clientDeta
     clearTimeout(tid);
   }
   try {
-    const blob = new Blob([JSON.stringify({ applicationId: aid, clientDetail: detail, token })], {
-      type: "application/json",
-    });
+    /* sendBeacon includes same-origin cookies; the beacon endpoint authenticates via cookie. */
+    const blob = new Blob([bodyJson], { type: "application/json" });
     if (navigator.sendBeacon("/api/voice-bot/interview-session-abandon-beacon", blob)) {
       dequeueAbandonJob(aid);
       return true;
     }
   } catch (_) {}
-  if (!noEnqueue) enqueueAbandonJob({ applicationId: aid, clientDetail: detail, token });
+  if (!noEnqueue) enqueueAbandonJob({ applicationId: aid, clientDetail: detail });
   return false;
 }
 export async function flushPendingAbandonQueue() {
@@ -349,14 +347,8 @@ export async function flushPendingAbandonQueue() {
   if (q.length === 0) return;
   const remaining = [];
   for (const item of q) {
-    const token = item.token || localStorage.getItem(LS_TOKEN);
-    if (!token) {
-      remaining.push(item);
-      continue;
-    }
     const ok = await postInterviewAbandonWithFallback(item.applicationId, item.clientDetail, {
       noEnqueue: true,
-      token,
     });
     if (!ok) remaining.push(item);
   }
@@ -398,10 +390,10 @@ export function getHrExternalConfig() {
   if (mode !== "iframe" && mode !== "redirect") return { useExternal: false, mode: "builtin", url: rawUrl };
   return { useExternal: true, mode, url: rawUrl };
 }
-export function fmtDate(d) { try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" }); } catch { return "—"; } }
+export function fmtDate(d) { try { return new Date(d).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }); } catch { return "—"; } }
 export function fmtDateTime(iso) {
   try {
-    return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+    return new Date(iso).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Kolkata" });
   } catch {
     return "—";
   }
@@ -738,13 +730,13 @@ export const AUDIT_TONE_CLASSES = {
 export function formatAuditDate(ts) {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", timeZone: "Asia/Kolkata" });
 }
 export function formatAuditTime(ts) {
   const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return "";
   return d
-    .toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true })
+    .toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true, timeZone: "Asia/Kolkata" })
     .replace(/\s*(am|pm)/i, (_, p) => " " + p.toUpperCase());
 }
 export function humanizeAuditEntry(entry, hrUsersMap, candidatesMap) {

@@ -8,6 +8,11 @@ function buildJobInviteLink(jobId) {
   return `${publicAppBase()}/jobs/${encodeURIComponent(String(jobId))}/apply?invite=1`;
 }
 
+function buildInterviewInviteLink(jobId) {
+  if (!jobId) return `${publicAppBase()}/login?returnTo=${encodeURIComponent("/portal")}`;
+  return `${publicAppBase()}/interview-invite?jobId=${encodeURIComponent(String(jobId))}`;
+}
+
 function buildTalentPoolLink() {
   return `${publicAppBase()}/login?returnTo=${encodeURIComponent("/portal")}`;
 }
@@ -25,6 +30,7 @@ function formatScheduledAt(iso) {
       hour: "numeric",
       minute: "2-digit",
       hour12: true,
+      timeZone: "Asia/Kolkata",
     });
   } catch {
     return String(iso);
@@ -317,6 +323,7 @@ Talent Acquisition Team`;
 module.exports = {
   publicAppBase,
   buildJobInviteLink,
+  buildInterviewInviteLink,
   buildTalentPoolLink,
   formatScheduledAt,
   buildInterviewApplyEmail,

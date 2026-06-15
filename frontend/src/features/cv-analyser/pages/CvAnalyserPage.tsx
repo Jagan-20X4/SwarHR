@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   publicAppOrigin,
-  authHeaders,
+  apiFetchInit,
   fmtSize,
 } from "@/legacy/helpersModule";
 import { CV_ANALYSER_MAX, CV_ANALYSER_MB } from "@/constants/cvAnalyserLimits";
@@ -40,7 +40,7 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
   const loadJobs = async () => {
     setJobsLoading(true);
     try {
-      const res = await fetch("/api/admin/cv-analyser/jobs", { headers: { ...authHeaders() } });
+      const res = await fetch("/api/admin/cv-analyser/jobs", apiFetchInit());
       const data = await res.json().catch(() => ({}));
       if (res.status === 503 && String(data.error || "").toLowerCase().includes("migration")) {
         setBanner("Run database migration: migration_cv_analyser_job.sql, then refresh.");
@@ -70,7 +70,7 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
 
   const loadRecruitmentJobs = async () => {
     try {
-      const res = await fetch("/api/admin/cv-analyser/recruitment-jobs", { headers: { ...authHeaders() } });
+      const res = await fetch("/api/admin/cv-analyser/recruitment-jobs", apiFetchInit());
       const data = await res.json().catch(() => ({}));
       if (res.ok) setRecruitmentJobs(data.jobs || []);
       else setRecruitmentJobs([]);
@@ -155,21 +155,19 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
           ? String(form.recruitmentJobId).trim()
           : null,
     });
-    const headers = { ...authHeaders(), "Content-Type": "application/json" };
+    const headers = { "Content-Type": "application/json" };
     try {
       if (idForPatch != null) {
-        const res = await fetch(`/api/admin/cv-analyser/jobs/${idForPatch}`, {
-          method: "PATCH",
-          headers,
-          body,
-        });
+        const res = await fetch(
+          `/api/admin/cv-analyser/jobs/${idForPatch}`,
+          apiFetchInit({ method: "PATCH", headers, body }),
+        );
         const data = await res.json().catch(() => ({}));
         if (res.status === 404) {
-          const res2 = await fetch("/api/admin/cv-analyser/jobs", {
-            method: "POST",
-            headers,
-            body,
-          });
+          const res2 = await fetch(
+            "/api/admin/cv-analyser/jobs",
+            apiFetchInit({ method: "POST", headers, body }),
+          );
           const data2 = await res2.json().catch(() => ({}));
           if (!res2.ok) {
             return { ok: false, error: data2.error || "Could not save job posting." };
@@ -179,11 +177,10 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
         if (!res.ok) return { ok: false, error: data.error || "Could not save job posting." };
         return { ok: true, data };
       }
-      const res = await fetch("/api/admin/cv-analyser/jobs", {
-        method: "POST",
-        headers,
-        body,
-      });
+      const res = await fetch(
+        "/api/admin/cv-analyser/jobs",
+        apiFetchInit({ method: "POST", headers, body }),
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok) return { ok: false, error: data.error || "Could not save job posting." };
       return { ok: true, data };
@@ -264,11 +261,10 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
     staged.forEach((s) => fd.append("files", s.file, s.file.name));
     fd.append("jobProfileId", String(selectedJobId));
     try {
-      const res = await fetch("/api/admin/cv-analyser/batch", {
-        method: "POST",
-        headers: { ...authHeaders() },
-        body: fd,
-      });
+      const res = await fetch(
+        "/api/admin/cv-analyser/batch",
+        apiFetchInit({ method: "POST", body: fd }),
+      );
       const data = await res.json().catch(() => ({}));
       if (res.status === 503 && (data.code === "AI_UNAVAILABLE" || /unavailable/i.test(data.error || ""))) {
         setBanner("AI service unavailable. Check ANTHROPIC_API_KEY on the server.");
@@ -306,7 +302,10 @@ export function CVAnalyserPage({ onBack, onSynced, jobs: boardJobs = [] }) {
     const ids = (results || []).filter((r) => r.status === "ok" && r.fileId).map((r) => r.fileId);
     if (ids.length === 0) return;
     try {
-      const res = await fetch("/api/admin/cv-analyser/export?fileIds=" + encodeURIComponent(ids.join(",")), { headers: { ...authHeaders() } });
+      const res = await fetch(
+        "/api/admin/cv-analyser/export?fileIds=" + encodeURIComponent(ids.join(",")),
+        apiFetchInit(),
+      );
       if (!res.ok) {
         const t = await res.json().catch(() => ({}));
         alert(t.error || "Export failed");

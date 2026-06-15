@@ -8,6 +8,7 @@ import {
 } from "@/app/router/ProtectedRoute";
 import { LoginPage, ForgotPasswordPage, RegisterPage, ApplyPage } from "@/app/pages/authPages";
 import { HomePage, PortalPage, RightsPage } from "@/app/pages/candidatePages";
+import { InterviewInvitePage } from "@/app/pages/interviewInvitePage";
 import { TalentPoolPage, TalentPoolDonePage } from "@/app/pages/talentPoolPages";
 import { InterviewFlowPage } from "@/app/pages/interviewFlowPage";
 import {
@@ -65,6 +66,7 @@ export function AppRoutes() {
             }
           />
           <Route path="jobs/:jobId/apply" element={<ApplyPage />} />
+          <Route path="interview-invite" element={<InterviewInvitePage />} />
           <Route
             path="interview"
             element={

@@ -44,8 +44,9 @@ export function LoginPage() {
     <Login
       coolingMonths={meta?.coolingMonths}
       dpo={meta?.dpo}
-      onCandSuccess={async ({ candidateId, token }) => {
-        localStorage.setItem(LS_TOKEN, token || "cookie");
+      onCandSuccess={async ({ candidateId }) => {
+        /* Session lives in the HttpOnly cookie; "cookie" is just a logged-in marker. */
+        localStorage.setItem(LS_TOKEN, "cookie");
         localStorage.setItem(LS_ROLE, "candidate");
         localStorage.setItem(LS_CANDIDATE_ID, candidateId);
         setRole("candidate");
@@ -53,7 +54,7 @@ export function LoginPage() {
         try {
           await syncStateFromServer();
         } catch (e) {}
-        if (await finalizeGuestJobApply()) return;
+        if (await finalizeGuestJobApply({ mode: "login" })) return;
         const preferHome = candidateLoginPreferHomeRef.current;
         candidateLoginPreferHomeRef.current = false;
         const sp = new URLSearchParams(window.location.search);
@@ -69,8 +70,8 @@ export function LoginPage() {
         }
         navigate(dest);
       }}
-      onHrSuccess={async ({ hrId, token }) => {
-        localStorage.setItem(LS_TOKEN, token || "cookie");
+      onHrSuccess={async ({ hrId }) => {
+        localStorage.setItem(LS_TOKEN, "cookie");
         localStorage.setItem(LS_ROLE, "hr");
         localStorage.setItem(LS_HR_ID, hrId);
         setRole("hr");
@@ -178,7 +179,7 @@ export function RegisterPage() {
             alert(data.error || "Registration failed");
             return;
           }
-          localStorage.setItem(LS_TOKEN, data.token || "cookie");
+          localStorage.setItem(LS_TOKEN, "cookie");
           localStorage.setItem(LS_ROLE, "candidate");
           if (data.candidateId) localStorage.setItem(LS_CANDIDATE_ID, data.candidateId);
           setRole("candidate");
@@ -211,7 +212,7 @@ export function RegisterPage() {
             navigate("/talent-pool/done");
             return;
           }
-          if (await finalizeGuestJobApply()) return;
+          if (await finalizeGuestJobApply({ mode: "register" })) return;
           const preferHome = candidateLoginPreferHomeRef.current;
           candidateLoginPreferHomeRef.current = false;
           const sp = new URLSearchParams(window.location.search);

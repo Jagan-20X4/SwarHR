@@ -2,6 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const { voiceBotAuth, voiceBotTokenRoles } = require("../middleware/serviceToken");
 const { requireHr } = require("../middleware/auth");
+const { readAuthTokenFromRequest } = require("../lib/authCookies");
 const { getFallbackQuestionTexts } = require("../lib/fallbackQuestions");
 const { buildInterviewScriptFromRows } = require("../lib/interviewScript");
 const {
@@ -461,14 +462,18 @@ function createVoiceBotRouter(pool) {
     }
   });
 
-  /** Same as interview-session-abandon but accepts JWT in JSON body for navigator.sendBeacon (no custom headers). */
+  /** Same as interview-session-abandon for navigator.sendBeacon (no custom headers).
+   *  Auth: session cookie (sent automatically by beacons) or legacy JWT in JSON body. */
   r.post("/interview-session-abandon-beacon", async (req, res) => {
     const body = req.body || {};
     const applicationId = parseInt(body.applicationId, 10);
     const clientDetail = body.clientDetail
       ? String(body.clientDetail).slice(0, 2000)
       : "";
-    const token = body.token ? String(body.token).trim() : "";
+    const token =
+      (body.token ? String(body.token).trim() : "") ||
+      readAuthTokenFromRequest(req) ||
+      "";
     if (!Number.isFinite(applicationId)) {
       res.status(400).json({ error: "applicationId required" });
       return;

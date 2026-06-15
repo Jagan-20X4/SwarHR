@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
-  authHeaders,
+  apiFetchInit,
 } from "@/legacy/helpersModule";
 import {
   MANDATORY_OPENING_DEFAULTS,
@@ -56,10 +56,10 @@ export function JobMaster({ jobs, onSave, onBack }) {
     if (!window.confirm(`Remove "${label}"? This will hide it from the careers page for candidates immediately.`)) return;
     setRemovingId(job.id);
     try {
-      const res = await fetch(`/api/jobs/${encodeURIComponent(job.id)}`, {
-        method: "DELETE",
-        headers: { ...authHeaders() },
-      });
+      const res = await fetch(
+        `/api/jobs/${encodeURIComponent(job.id)}`,
+        apiFetchInit({ method: "DELETE" }),
+      );
       if (!res.ok && res.status !== 404) {
         const data = await res.json().catch(() => ({}));
         setToast(data.error || `Could not remove job (${res.status}).`);

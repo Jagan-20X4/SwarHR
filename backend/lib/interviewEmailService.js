@@ -1,6 +1,7 @@
 const { sendMail, isMailEnabled } = require("./mailer");
 const {
   buildJobInviteLink,
+  buildInterviewInviteLink,
   buildInterviewApplyEmail,
   buildInterviewReminderEmail,
   buildInterviewCompletionEmail,
@@ -61,7 +62,7 @@ async function loadApplicationContext(pool, candidateId, jobId, applicationId) {
     candidateName: candRes.rows[0].name || "",
     candidateEmail: candRes.rows[0].email || "",
     jobTitle,
-    interviewLink: buildJobInviteLink(jobId),
+    interviewLink: buildInterviewInviteLink(jobId),
   };
 }
 
@@ -123,6 +124,7 @@ async function sendIntroInterviewEmail(pool, candidateId, { jobId, applicationId
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "interview_intro",
   });
   if (result.skipped) return result;
 
@@ -176,6 +178,7 @@ async function sendScheduledInterviewEmail(
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "interview_scheduled",
   });
   if (result.skipped) return result;
 
@@ -200,7 +203,7 @@ async function sendTalentPoolAckEmail(entry) {
     desiredRoles: entry.desiredRoles,
   });
 
-  return sendMail({ to: email, subject, text: body });
+  return sendMail({ to: email, subject, text: body, context: "talent_pool_ack" });
 }
 
 async function sendInterviewReminderEmail(pool, applicationId) {
@@ -264,6 +267,7 @@ async function sendInterviewReminderEmail(pool, applicationId) {
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "interview_reminder",
   });
   if (result.skipped) return result;
 
@@ -280,25 +284,46 @@ async function sendInterviewReminderEmail(pool, applicationId) {
   return { ok: true, applicationId: app.id };
 }
 
+/** Release a claimed reminder slot so the next poll retries it. */
+async function releaseReminderClaim(pool, applicationId, scheduledAt) {
+  try {
+    await pool.query(
+      `UPDATE application SET reminder_email_sent_for_at = NULL
+       WHERE id = $1 AND reminder_email_sent_for_at = $2::timestamptz`,
+      [applicationId, scheduledAt],
+    );
+  } catch (err) {
+    console.error("[reminder] claim release failed:", err.message || err);
+  }
+}
+
+/** Claims due rows atomically (FOR UPDATE SKIP LOCKED) before sending, so
+ *  multiple server instances can poll concurrently without duplicate emails.
+ *  Failed sends release the claim and retry on the next poll. */
 async function processInterviewReminders(pool) {
   if (!isMailEnabled()) {
     return { skipped: true, reason: "disabled" };
   }
 
-  let rows;
+  let claimed;
   try {
-    rows = await pool.query(
-      `SELECT a.id
-       FROM application a
-       INNER JOIN candidate c ON c.id = a.candidate_id
-       WHERE a.interview_scheduled_at IS NOT NULL
-         AND a.interview_completed_at IS NULL
-         AND NOW() >= a.interview_scheduled_at - INTERVAL '30 minutes'
-         AND NOW() < a.interview_scheduled_at
-         AND (
-           a.reminder_email_sent_for_at IS NULL
-           OR a.reminder_email_sent_for_at <> a.interview_scheduled_at
-         )`,
+    claimed = await pool.query(
+      `UPDATE application a
+       SET reminder_email_sent_for_at = a.interview_scheduled_at
+       WHERE a.id IN (
+         SELECT id FROM application
+         WHERE interview_scheduled_at IS NOT NULL
+           AND interview_completed_at IS NULL
+           AND NOW() >= interview_scheduled_at - INTERVAL '30 minutes'
+           AND NOW() < interview_scheduled_at
+           AND (
+             reminder_email_sent_for_at IS NULL
+             OR reminder_email_sent_for_at <> interview_scheduled_at
+           )
+         FOR UPDATE SKIP LOCKED
+         LIMIT 50
+       )
+       RETURNING a.id, a.candidate_id, a.job_id, a.interview_scheduled_at`,
     );
   } catch (e) {
     if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
@@ -306,11 +331,41 @@ async function processInterviewReminders(pool) {
   }
 
   let sent = 0;
-  for (const row of rows.rows) {
-    const out = await sendInterviewReminderEmail(pool, row.id);
-    if (out.ok) sent += 1;
+  for (const app of claimed.rows) {
+    try {
+      const ctx = await loadApplicationContext(
+        pool,
+        app.candidate_id,
+        app.job_id,
+        app.id,
+      );
+      if (!ctx?.candidateEmail) continue;
+
+      const { subject, body } = buildInterviewReminderEmail({
+        candidateName: ctx.candidateName,
+        jobTitle: ctx.jobTitle,
+        scheduledAt: app.interview_scheduled_at,
+      });
+      const result = await sendMail({
+        to: ctx.candidateEmail,
+        subject,
+        text: body,
+        context: "interview_reminder",
+      });
+      if (result.skipped) {
+        await releaseReminderClaim(pool, app.id, app.interview_scheduled_at);
+        continue;
+      }
+      sent += 1;
+    } catch (err) {
+      console.error(
+        `[reminder] send failed app=${app.id}:`,
+        err.message || err,
+      );
+      await releaseReminderClaim(pool, app.id, app.interview_scheduled_at);
+    }
   }
-  return { ok: true, due: rows.rows.length, sent };
+  return { ok: true, due: claimed.rows.length, sent };
 }
 
 async function sendInterviewCompletionEmail(
@@ -379,6 +434,7 @@ async function sendInterviewCompletionEmail(
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "interview_completed",
   });
   if (result.skipped) return result;
 
@@ -454,6 +510,7 @@ async function sendInterviewMissedEmail(pool, applicationId) {
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "interview_missed",
   });
   if (result.skipped) return result;
 
@@ -470,24 +527,44 @@ async function sendInterviewMissedEmail(pool, applicationId) {
   return { ok: true, applicationId: app.id };
 }
 
+/** Release a claimed missed-slot so the next poll retries it. */
+async function releaseMissedClaim(pool, applicationId, scheduledAt) {
+  try {
+    await pool.query(
+      `UPDATE application SET missed_email_sent_for_at = NULL
+       WHERE id = $1 AND missed_email_sent_for_at = $2::timestamptz`,
+      [applicationId, scheduledAt],
+    );
+  } catch (err) {
+    console.error("[missed] claim release failed:", err.message || err);
+  }
+}
+
+/** Claims overdue rows atomically (FOR UPDATE SKIP LOCKED) before sending —
+ *  safe to run on multiple server instances without duplicate emails. */
 async function processInterviewMissedSlots(pool) {
   if (!isMailEnabled()) {
     return { skipped: true, reason: "disabled" };
   }
 
-  let rows;
+  let claimed;
   try {
-    rows = await pool.query(
-      `SELECT a.id
-       FROM application a
-       INNER JOIN candidate c ON c.id = a.candidate_id
-       WHERE a.interview_scheduled_at IS NOT NULL
-         AND a.interview_completed_at IS NULL
-         AND NOW() >= a.interview_scheduled_at + ($1 * INTERVAL '1 minute')
-         AND (
-           a.missed_email_sent_for_at IS NULL
-           OR a.missed_email_sent_for_at <> a.interview_scheduled_at
-         )`,
+    claimed = await pool.query(
+      `UPDATE application a
+       SET missed_email_sent_for_at = a.interview_scheduled_at
+       WHERE a.id IN (
+         SELECT id FROM application
+         WHERE interview_scheduled_at IS NOT NULL
+           AND interview_completed_at IS NULL
+           AND NOW() >= interview_scheduled_at + ($1 * INTERVAL '1 minute')
+           AND (
+             missed_email_sent_for_at IS NULL
+             OR missed_email_sent_for_at <> interview_scheduled_at
+           )
+         FOR UPDATE SKIP LOCKED
+         LIMIT 50
+       )
+       RETURNING a.id, a.candidate_id, a.job_id, a.interview_scheduled_at`,
       [INTERVIEW_START_GRACE_MINUTES],
     );
   } catch (e) {
@@ -496,11 +573,37 @@ async function processInterviewMissedSlots(pool) {
   }
 
   let sent = 0;
-  for (const row of rows.rows) {
-    const out = await sendInterviewMissedEmail(pool, row.id);
-    if (out.ok) sent += 1;
+  for (const app of claimed.rows) {
+    try {
+      const ctx = await loadApplicationContext(
+        pool,
+        app.candidate_id,
+        app.job_id,
+        app.id,
+      );
+      if (!ctx?.candidateEmail) continue;
+
+      const { subject, body } = buildInterviewMissedEmail({
+        candidateName: ctx.candidateName,
+        jobTitle: ctx.jobTitle,
+      });
+      const result = await sendMail({
+        to: ctx.candidateEmail,
+        subject,
+        text: body,
+        context: "interview_missed",
+      });
+      if (result.skipped) {
+        await releaseMissedClaim(pool, app.id, app.interview_scheduled_at);
+        continue;
+      }
+      sent += 1;
+    } catch (err) {
+      console.error(`[missed] send failed app=${app.id}:`, err.message || err);
+      await releaseMissedClaim(pool, app.id, app.interview_scheduled_at);
+    }
   }
-  return { ok: true, due: rows.rows.length, sent };
+  return { ok: true, due: claimed.rows.length, sent };
 }
 
 async function sendHrDecisionEmail(pool, applicationId) {
@@ -569,6 +672,7 @@ async function sendHrDecisionEmail(pool, applicationId) {
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "hr_decision",
   });
   if (result.skipped) return result;
 
@@ -642,6 +746,7 @@ async function sendReattemptApprovedEmail(pool, applicationId) {
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "reattempt_approved",
   });
   if (result.skipped) return result;
 
@@ -713,6 +818,7 @@ async function sendReattemptRejectedEmail(pool, applicationId) {
     to: ctx.candidateEmail,
     subject,
     text: body,
+    context: "reattempt_rejected",
   });
   if (result.skipped) return result;
 
@@ -783,7 +889,12 @@ async function sendCvAnalyserInviteEmail({
     interviewLink,
   });
 
-  const result = await sendMail({ to, subject, text: body });
+  const result = await sendMail({
+    to,
+    subject,
+    text: body,
+    context: "cv_analyser_invite",
+  });
   if (result.skipped) return result;
   return { ok: true, email: to };
 }

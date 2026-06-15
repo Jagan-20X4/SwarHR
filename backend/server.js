@@ -126,6 +126,40 @@ app.use(
     crossOriginEmbedderPolicy: false,
   }),
 );
+
+/* Structured request logging — quiet mode: only errors (5xx), client failures
+ * (4xx), and slow requests (>2s) produce a log line. Successful fast requests
+ * are silent to keep the console readable. /health and /ready are excluded. */
+const pinoHttp = require("pino-http");
+const SLOW_REQUEST_MS = envInt("SLOW_REQUEST_LOG_MS", 2000);
+app.use(
+  pinoHttp({
+    autoLogging: {
+      ignore: (req) => req.url === "/health" || req.url === "/ready",
+    },
+    customLogLevel: (req, res, err) => {
+      if (err || res.statusCode >= 500) return "error";
+      if (res.statusCode >= 400) return "warn";
+      const startTime = res[pinoHttp.startTime];
+      if (startTime && Date.now() - startTime > SLOW_REQUEST_MS) return "warn";
+      return "silent";
+    },
+    customProps: (req) => {
+      const p = bearerPayload(req);
+      const role =
+        p?.typ === "hr" ? "hr" : p?.typ === "cand" ? "candidate" : "anon";
+      return { role };
+    },
+    serializers: {
+      req(req) {
+        return { method: req.method, url: req.url };
+      },
+      res(res) {
+        return { statusCode: res.statusCode };
+      },
+    },
+  }),
+);
 app.use(
   cors({
     origin(origin, callback) {
@@ -182,9 +216,11 @@ function registrationEnabled() {
   return !isProduction();
 }
 
+/** Sets the HttpOnly session cookie; the raw JWT is never returned in the JSON
+ *  body so scripts (and XSS) cannot read it. */
 function sendAuthJson(res, { token, typ, body }) {
   setAuthCookie(res, token, typ);
-  res.json({ ...body, token });
+  res.json(body);
 }
 
 app.get("/health", (_req, res) => {
@@ -246,6 +282,7 @@ app.put("/api/state", dbReady, requireHr, async (req, res) => {
       return;
     }
     await saveAppState(pool, body);
+    invalidateJobsCache();
     const state = await loadAppStateForHr(pool);
     res.json(state);
   } catch (e) {
@@ -291,30 +328,43 @@ app.post(
   },
 );
 
+/** Run an email task in the background and log its outcome (idempotency is
+ *  enforced by sent-marker columns, so retriggers are safe). */
+function runEmailTask(label, taskFn) {
+  Promise.resolve()
+    .then(taskFn)
+    .then((out) => {
+      if (out?.skipped) {
+        console.log(`[mail] ${label}: skipped (${out.reason})`);
+      }
+    })
+    .catch((err) => {
+      console.error(`[mail] ${label} failed:`, err.message || err);
+    });
+}
+
 app.post(
   "/api/me/interview-email/intro",
   dbReady,
   requireCandidate,
   rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-intro" }),
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
-      if (!jobId) {
-        res.status(400).json({ error: "jobId required" });
-        return;
-      }
-      const applicationId =
-        body.applicationId != null ? Number(body.applicationId) : null;
-      const out = await sendIntroInterviewEmail(pool, req.candidateId, {
+  (req, res) => {
+    const body = req.body || {};
+    const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+    if (!jobId) {
+      res.status(400).json({ error: "jobId required" });
+      return;
+    }
+    const applicationId =
+      body.applicationId != null ? Number(body.applicationId) : null;
+    const candidateId = req.candidateId;
+    runEmailTask(`intro candidate=${candidateId} job=${jobId}`, () =>
+      sendIntroInterviewEmail(pool, candidateId, {
         jobId,
         applicationId: Number.isFinite(applicationId) ? applicationId : null,
-      });
-      res.json(out);
-    } catch (e) {
-      console.error(e);
-      sendApiError(res, e);
-    }
+      }),
+    );
+    res.status(202).json({ ok: true, queued: true });
   },
 );
 
@@ -323,27 +373,25 @@ app.post(
   dbReady,
   requireCandidate,
   rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-sched" }),
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
-      const scheduledAt = body.scheduledAt != null ? String(body.scheduledAt) : "";
-      if (!jobId || !scheduledAt) {
-        res.status(400).json({ error: "jobId and scheduledAt required" });
-        return;
-      }
-      const applicationId =
-        body.applicationId != null ? Number(body.applicationId) : null;
-      const out = await sendScheduledInterviewEmail(pool, req.candidateId, {
+  (req, res) => {
+    const body = req.body || {};
+    const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+    const scheduledAt = body.scheduledAt != null ? String(body.scheduledAt) : "";
+    if (!jobId || !scheduledAt) {
+      res.status(400).json({ error: "jobId and scheduledAt required" });
+      return;
+    }
+    const applicationId =
+      body.applicationId != null ? Number(body.applicationId) : null;
+    const candidateId = req.candidateId;
+    runEmailTask(`scheduled candidate=${candidateId} job=${jobId}`, () =>
+      sendScheduledInterviewEmail(pool, candidateId, {
         jobId,
         applicationId: Number.isFinite(applicationId) ? applicationId : null,
         scheduledAt,
-      });
-      res.json(out);
-    } catch (e) {
-      console.error(e);
-      sendApiError(res, e);
-    }
+      }),
+    );
+    res.status(202).json({ ok: true, queued: true });
   },
 );
 
@@ -352,25 +400,23 @@ app.post(
   dbReady,
   requireCandidate,
   rateLimit({ windowMs: 60_000, max: 10, keySuffix: "interview-email-done" }),
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const jobId = body.jobId != null ? String(body.jobId).trim() : "";
-      if (!jobId) {
-        res.status(400).json({ error: "jobId required" });
-        return;
-      }
-      const applicationId =
-        body.applicationId != null ? Number(body.applicationId) : null;
-      const out = await sendInterviewCompletionEmail(pool, req.candidateId, {
+  (req, res) => {
+    const body = req.body || {};
+    const jobId = body.jobId != null ? String(body.jobId).trim() : "";
+    if (!jobId) {
+      res.status(400).json({ error: "jobId required" });
+      return;
+    }
+    const applicationId =
+      body.applicationId != null ? Number(body.applicationId) : null;
+    const candidateId = req.candidateId;
+    runEmailTask(`completion candidate=${candidateId} job=${jobId}`, () =>
+      sendInterviewCompletionEmail(pool, candidateId, {
         jobId,
         applicationId: Number.isFinite(applicationId) ? applicationId : null,
-      });
-      res.json(out);
-    } catch (e) {
-      console.error(e);
-      sendApiError(res, e);
-    }
+      }),
+    );
+    res.status(202).json({ ok: true, queued: true });
   },
 );
 
@@ -393,11 +439,36 @@ app.use(
   createCvAnalyserRouter({ pool }),
 );
 
+/* Anonymous job-board cache: the response for guests is identical for everyone,
+ * so serve it from memory for a short TTL. Logged-in candidates get per-user
+ * cooling/apply status and are never cached. Invalidated on any job mutation. */
+const JOBS_CACHE_TTL_MS = envInt("JOBS_CACHE_TTL_MS", 30_000);
+let anonJobsCache = { at: 0, payload: null };
+function invalidateJobsCache() {
+  anonJobsCache = { at: 0, payload: null };
+}
+
+const TTS_PROVIDER = process.env.USE_ELEVENLABS === "true" && process.env.ELEVENLABS_API_KEY
+  ? "elevenlabs"
+  : "browser";
+
 app.get("/api/jobs", dbReady, async (req, res) => {
   try {
     const cand = bearerCandidateId(req);
+    if (!cand) {
+      const now = Date.now();
+      if (anonJobsCache.payload && now - anonJobsCache.at < JOBS_CACHE_TTL_MS) {
+        res.json(anonJobsCache.payload);
+        return;
+      }
+      const { meta, jobs } = await listJobsApi(pool, null);
+      const enrichedMeta = { ...(meta || {}), ttsProvider: TTS_PROVIDER };
+      anonJobsCache = { at: now, payload: { meta: enrichedMeta, jobs } };
+      res.json(anonJobsCache.payload);
+      return;
+    }
     const { meta, jobs } = await listJobsApi(pool, cand);
-    res.json({ meta, jobs });
+    res.json({ meta: { ...(meta || {}), ttsProvider: TTS_PROVIDER }, jobs });
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: String(e.message || e) });
@@ -411,6 +482,7 @@ app.delete("/api/jobs/:id", dbReady, requireHr, async (req, res) => {
       res.status(out.status || 400).json({ error: out.error });
       return;
     }
+    invalidateJobsCache();
     res.json({ ok: true, id: req.params.id });
   } catch (e) {
     console.error(e);
@@ -659,6 +731,75 @@ app.post(
       upstreamUrl: UPSTREAM,
       sendApiError,
     }),
+);
+
+// ─── ElevenLabs TTS proxy ────────────────────────────────────────────────────
+const USE_ELEVENLABS = process.env.USE_ELEVENLABS === "true";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
+const ELEVENLABS_MODEL = process.env.ELEVENLABS_MODEL || "eleven_turbo_v2_5";
+
+app.post(
+  "/api/tts",
+  dbReady,
+  requireCandidate,
+  rateLimit({ windowMs: 60_000, max: 80, keySuffix: "tts" }),
+  async (req, res) => {
+    if (!USE_ELEVENLABS || !ELEVENLABS_API_KEY || !ELEVENLABS_VOICE_ID) {
+      res.status(503).json({ error: "TTS not configured" });
+      return;
+    }
+    const { text, language } = req.body || {};
+    if (!text || typeof text !== "string" || !text.trim()) {
+      res.status(400).json({ error: "text is required" });
+      return;
+    }
+    try {
+      const upstream = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}/stream`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json",
+            Accept: "audio/mpeg",
+          },
+          body: JSON.stringify({
+            text: text.trim(),
+            model_id: ELEVENLABS_MODEL,
+            language_code: language || "en",
+            voice_settings: {
+              stability: 0.45,
+              similarity_boost: 0.80,
+              style: 0.30,
+              use_speaker_boost: true,
+            },
+          }),
+        },
+      );
+      if (!upstream.ok) {
+        const errText = await upstream.text().catch(() => "");
+        console.error("[tts] ElevenLabs error:", upstream.status, errText);
+        res.status(502).json({ error: "TTS upstream error", detail: upstream.status });
+        return;
+      }
+      res.setHeader("Content-Type", "audio/mpeg");
+      res.setHeader("Cache-Control", "no-store");
+      // Stream MP3 bytes directly to the browser
+      const reader = upstream.body.getReader();
+      const pump = async () => {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) { res.end(); return; }
+          res.write(Buffer.from(value));
+        }
+      };
+      await pump();
+    } catch (e) {
+      console.error("[tts] error:", e);
+      if (!res.headersSent) res.status(500).json({ error: "TTS failed" });
+    }
+  },
 );
 
 assertJwtSecretForProduction();

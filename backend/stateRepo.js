@@ -1200,9 +1200,14 @@ async function listTalentPoolPaginated(
   };
 }
 
+/* Audit history is append-only and unbounded; cap what's shipped to the HR
+ * shell so state payloads stay small. Uses idx_audit_occurred (occurred_at DESC). */
+const AUDIT_LOAD_LIMIT = Number(process.env.AUDIT_LOAD_LIMIT || 1000);
+
 async function loadAudit(client) {
   const r = await client.query(
-    "SELECT id, occurred_at, actor, action, target_ref, details FROM audit_event ORDER BY occurred_at DESC",
+    "SELECT id, occurred_at, actor, action, target_ref, details FROM audit_event ORDER BY occurred_at DESC LIMIT $1",
+    [AUDIT_LOAD_LIMIT],
   );
   return r.rows.map((a) => ({
     id: a.id,
@@ -1489,21 +1494,6 @@ function saveRetryDelayMs(attempt) {
   return base + Math.floor(Math.random() * 40);
 }
 
-async function loadTalentCvKeys(client) {
-  const talentCvKeys = new Map();
-  try {
-    const tpKeys = await client.query(
-      "SELECT talent_pool_id, s3_key FROM talent_pool_cv_file WHERE s3_key IS NOT NULL",
-    );
-    for (const row of tpKeys.rows) {
-      talentCvKeys.set(row.talent_pool_id, row.s3_key);
-    }
-  } catch (_e) {
-    /* s3_key column may be missing until migration */
-  }
-  return talentCvKeys;
-}
-
 /** Candidate ids that exist in DB (batch). Stale talent-pool links are stored as NULL. */
 async function loadExistingCandidateIds(client, ids) {
   const uniq = [
@@ -1585,179 +1575,52 @@ async function pruneJobsNotInClient(client, jobs) {
   await client.query("DELETE FROM job WHERE NOT (id = ANY($1::text[]))", [ids]);
 }
 
-async function writeTalentPoolFromClient(client, talentPool, talentCvKeys) {
-  const validCandidateIds = await loadExistingCandidateIds(
-    client,
-    talentPool.map((t) => t.candidateId),
-  );
-
-  for (const t of talentPool) {
-    const linkedId = resolveLinkedCandidateId(t.candidateId, validCandidateIds);
-    const appDate =
-      t.applicationDate != null && String(t.applicationDate).trim() !== ""
-        ? new Date(String(t.applicationDate).slice(0, 10) + "T12:00:00")
-        : null;
-    try {
-      await client.query(
-        `INSERT INTO talent_pool_entry (
-           id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-           qualification, current_ctc, current_employer, source, application_date, cooling_period,
-           preferred_city_1, preferred_city_2, preferred_city_3
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
-        [
-          t.id,
-          linkedId,
-          t.name,
-          t.email,
-          t.phone || "",
-          t.experience ?? 0,
-          t.location || "",
-          t.keywords || "",
-          t.cvText || "",
-          new Date(t.submittedAt),
-          true,
-          t.qualification != null ? String(t.qualification).slice(0, 500) : null,
-          t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
-          t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
-          t.source != null ? String(t.source).slice(0, 128) : null,
-          appDate,
-          t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
-          t.preferredCity1 != null ? String(t.preferredCity1).slice(0, 255) : null,
-          t.preferredCity2 != null ? String(t.preferredCity2).slice(0, 255) : null,
-          t.preferredCity3 != null ? String(t.preferredCity3).slice(0, 255) : null,
-        ],
-      );
-    } catch (e) {
-      if (e.code === "42703") {
-        try {
-          await client.query(
-            `INSERT INTO talent_pool_entry (
-               id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged,
-               qualification, current_ctc, current_employer, source, application_date, cooling_period
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-            [
-              t.id,
-              linkedId,
-              t.name,
-              t.email,
-              t.phone || "",
-              t.experience ?? 0,
-              t.location || "",
-              t.keywords || "",
-              t.cvText || "",
-              new Date(t.submittedAt),
-              true,
-              t.qualification != null ? String(t.qualification).slice(0, 500) : null,
-              t.currentCtc != null ? String(t.currentCtc).slice(0, 64) : null,
-              t.currentEmployer != null ? String(t.currentEmployer).slice(0, 255) : null,
-              t.source != null ? String(t.source).slice(0, 128) : null,
-              appDate,
-              t.coolingPeriod != null ? String(t.coolingPeriod).slice(0, 255) : null,
-            ],
-          );
-        } catch (e2) {
-          if (e2.code === "42703") {
-            await client.query(
-              `INSERT INTO talent_pool_entry (id, linked_candidate_id, name, email, phone, experience_years, location, keywords, cv_text, submitted_at, consent_acknowledged)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-              [
-                t.id,
-                linkedId,
-                t.name,
-                t.email,
-                t.phone || "",
-                t.experience ?? 0,
-                t.location || "",
-                t.keywords || "",
-                t.cvText || "",
-                new Date(t.submittedAt),
-                true,
-              ],
-            );
-          } else throw e2;
-        }
-      } else throw e;
-    }
-    for (const dr of t.desiredRoles || []) {
-      await client.query(
-        "INSERT INTO talent_pool_desired_role (talent_pool_id, role_name) VALUES ($1,$2)",
-        [t.id, dr],
-      );
-    }
-    for (const sk of t.skills || []) {
-      await client.query(
-        "INSERT INTO talent_pool_skill (talent_pool_id, skill_name) VALUES ($1,$2)",
-        [t.id, sk],
-      );
-    }
-    if (t.cvFile) {
-      await persistTalentPoolCv(
-        client,
-        t.id,
-        t.cvFile,
-        talentCvKeys.get(t.id) || null,
-      );
-    }
-    for (const m of t.mappedToJobs || []) {
-      await client.query(
-        `INSERT INTO talent_pool_job_mapping (talent_pool_id, job_id, mapped_at, mapped_by_hr_id)
-         VALUES ($1,$2,$3,$4)`,
-        [t.id, m.jobId, new Date(m.mappedAt), m.mappedBy || null],
-      );
-    }
-  }
-}
-
+/** Append-only: inserts audit events the server hasn't seen yet (by id) in one
+ *  batched statement. Existing rows are never modified or deleted, so the
+ *  client cannot rewrite history and concurrent HR saves cannot lose entries. */
 async function writeAuditFromClient(client, auditLog) {
+  const ids = [];
+  const times = [];
+  const actors = [];
+  const actions = [];
+  const targets = [];
+  const details = [];
   for (const ev of auditLog) {
-    await client.query(
-      `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
-       VALUES ($1,$2,$3,$4,$5,$6)`,
-      [
-        ev.id,
-        new Date(ev.timestamp),
-        ev.actor,
-        ev.action,
-        ev.target || null,
-        ev.details || "",
-      ],
-    );
+    if (!ev || ev.id == null || String(ev.id).trim() === "") continue;
+    const ts = new Date(ev.timestamp);
+    ids.push(String(ev.id));
+    times.push(Number.isNaN(ts.getTime()) ? new Date().toISOString() : ts.toISOString());
+    actors.push(String(ev.actor || "HR"));
+    actions.push(String(ev.action || ""));
+    targets.push(ev.target != null ? String(ev.target) : null);
+    details.push(ev.details != null ? String(ev.details) : "");
   }
+  if (ids.length === 0) return;
+  await client.query(
+    `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
+     SELECT * FROM unnest(
+       $1::varchar[], $2::timestamptz[], $3::varchar[],
+       $4::varchar[], $5::varchar[], $6::text[]
+     )
+     ON CONFLICT (id) DO NOTHING`,
+    [ids, times, actors, actions, targets, details],
+  );
 }
 
-/** Persist jobs, audit, and optionally talent pool — never truncates candidate/application data. */
+/** Persist jobs + audit. Never touches candidate/application/talent-pool data.
+ *  audit_event is append-only (writeAuditFromClient); talent pool is managed
+ *  exclusively via /api/talent-pool endpoints. */
 async function saveHrShellStateOnce(pool, body) {
   const jobs = body.jobs || [];
-  const syncTalentPool = body.talentPool !== undefined;
-  const talentPool = body.talentPool || [];
   const auditLog = body.auditLog || [];
 
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    const talentCvKeys = syncTalentPool
-      ? await loadTalentCvKeys(client)
-      : null;
 
     /* Do NOT TRUNCATE job — CASCADE would wipe candidate/application/transcript tables. */
-    await client.query("TRUNCATE TABLE audit_event RESTART IDENTITY");
-    if (syncTalentPool) {
-      await client.query(`
-        TRUNCATE TABLE
-          talent_pool_job_mapping,
-          talent_pool_skill,
-          talent_pool_desired_role,
-          talent_pool_cv_file,
-          talent_pool_entry
-        RESTART IDENTITY CASCADE
-      `);
-    }
-
     await writeJobsFromClient(client, jobs);
     await pruneJobsNotInClient(client, jobs);
-    if (syncTalentPool) {
-      await writeTalentPoolFromClient(client, talentPool, talentCvKeys);
-    }
     await writeAuditFromClient(client, auditLog);
 
     await client.query("COMMIT");
@@ -1785,6 +1648,13 @@ async function saveAppStateOnce(pool, body) {
   if (Array.isArray(body.candidates) && body.candidates.length > 0) {
     const err = new Error(
       "Candidate data cannot be saved via PUT /api/state. Use PATCH /api/candidates/:id instead.",
+    );
+    err.status = 400;
+    throw err;
+  }
+  if (body.talentPool !== undefined) {
+    const err = new Error(
+      "Talent pool data cannot be saved via PUT /api/state. Use the /api/talent-pool APIs instead.",
     );
     err.status = 400;
     throw err;

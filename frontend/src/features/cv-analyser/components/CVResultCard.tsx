@@ -1,6 +1,6 @@
 // @ts-nocheck
 import React, { useState } from "react";
-import { authHeaders, verdictLabel } from "@/legacy/helpersModule";
+import { apiFetchInit, verdictLabel } from "@/legacy/helpersModule";
 export function CVResultCard({ row, jobTitle, inviteUrl, recruitmentJobId }) {
   const [open, setOpen] = useState(false);
   const [inviteBusy, setInviteBusy] = useState(false);
@@ -32,16 +32,19 @@ export function CVResultCard({ row, jobTitle, inviteUrl, recruitmentJobId }) {
     if (!canInvite || inviteBusy || inviteSent) return;
     setInviteBusy(true);
     try {
-      const r = await fetch("/api/admin/cv-analyser/send-invite", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({
-          candidateName: candName,
-          email: candEmail,
-          jobTitle: jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : "",
-          recruitmentJobId: String(recruitmentJobId),
+      const r = await fetch(
+        "/api/admin/cv-analyser/send-invite",
+        apiFetchInit({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            candidateName: candName,
+            email: candEmail,
+            jobTitle: jobTitle && String(jobTitle).trim() ? String(jobTitle).trim() : "",
+            recruitmentJobId: String(recruitmentJobId),
+          }),
         }),
-      });
+      );
       const data = await r.json().catch(() => ({}));
       if (!r.ok) {
         window.alert(data.error || "Could not send invite email.");

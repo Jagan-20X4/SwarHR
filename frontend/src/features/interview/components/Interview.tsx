@@ -5,7 +5,11 @@ import {
   pickFemaleFirstSpeechVoice,
   apiFetchInit,
 } from "@/legacy/helpersModule";
+import { useAppState } from "@/app/state/AppStateProvider";
 export function Interview({ context, applicationId, onEnd, onAbandon }) {
+  const { meta } = useAppState();
+  const ttsProvider = meta?.ttsProvider || "browser";
+  const audioRef = useRef(null);  // used for ElevenLabs MP3 playback
   const RESOLVE_TIMEOUT_MS = 90000;
   const getScriptedList = (scr, ph) => {
     if (!scr) return [];
@@ -64,7 +68,8 @@ export function Interview({ context, applicationId, onEnd, onAbandon }) {
   const [micError, setMicError] = useState("");
   const [showText, setShowText] = useState(false);
   const [textInput, setTextInput] = useState("");
-  const [voices, setVoices] = useState([]);
+  const voicesRef = useRef([]);
+  const pinnedVoiceRef = useRef(null);
   const recRef = useRef(null);
   const txRef = useRef("");
   const spokenAnswerCommittedRef = useRef(false);
@@ -201,7 +206,7 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
       void safeAbandon("component_unmount");
     };
   }, [applicationId]);
-  useEffect(() => { const load = () => setVoices(window.speechSynthesis?.getVoices?.() || []); load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
+  useEffect(() => { const load = () => { voicesRef.current = window.speechSynthesis?.getVoices?.() || []; }; load(); if (window.speechSynthesis) window.speechSynthesis.onvoiceschanged = load; }, []);
   useEffect(() => {
     busyRef.current = busy;
   }, [busy]);
@@ -209,6 +214,7 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
     listeningRef.current = listening;
   }, [listening]);
   useEffect(() => {
+    pinnedVoiceRef.current = null;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setSupported(false); setShowText(true); return; }
     const rec = new SR();
@@ -283,14 +289,79 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
     };
   }, [langCode]);
   const speak = (text) => new Promise((resolve) => {
+    if (!text) { resolve(); return; }
+
+    // ── ElevenLabs path ──────────────────────────────────────────────────────
+    if (ttsProvider === "elevenlabs") {
+      setSpeaking(true);
+      // Stop any current ElevenLabs audio
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      // Strip the language prefix (e.g. "en-IN" → "en") for ElevenLabs
+      const langShort = (langCode || "en").split("-")[0];
+      fetch(
+        "/api/tts",
+        apiFetchInit({
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: text.trim(), language: langShort }),
+        }),
+      )
+        .then((r) => {
+          if (!r.ok) throw new Error(`TTS HTTP ${r.status}`);
+          return r.blob();
+        })
+        .then((blob) => {
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          audioRef.current = audio;
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            audioRef.current = null;
+            setSpeaking(false);
+            resolve();
+          };
+          audio.onerror = () => {
+            URL.revokeObjectURL(url);
+            audioRef.current = null;
+            setSpeaking(false);
+            resolve();
+          };
+          audio.play().catch(() => { setSpeaking(false); resolve(); });
+        })
+        .catch((err) => {
+          console.warn("[tts] ElevenLabs failed, falling back to browser TTS:", err);
+          // Graceful fallback to browser TTS on error
+          setSpeaking(false);
+          speakBrowser(text).then(resolve);
+        });
+      return;
+    }
+
+    // ── Browser TTS path (default) ───────────────────────────────────────────
+    speakBrowser(text).then(resolve);
+  });
+
+  // Browser Web Speech API TTS — kept separate so ElevenLabs can fall back to it
+  const speakBrowser = (text) => new Promise((resolve) => {
     if (!text || !window.speechSynthesis) { resolve(); return; }
     window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.lang = langCode;
     u.rate = 0.91;
     u.pitch = 1.02;
-    const v = pickFemaleFirstSpeechVoice(langCode, voices);
-    if (v) u.voice = v;
+    // Refresh voices from browser if not yet loaded
+    if (!voicesRef.current.length) {
+      const fresh = window.speechSynthesis?.getVoices?.() || [];
+      if (fresh.length) voicesRef.current = fresh;
+    }
+    // Pin the female voice on first successful pick and reuse for all questions
+    if (!pinnedVoiceRef.current) {
+      pinnedVoiceRef.current = pickFemaleFirstSpeechVoice(langCode, voicesRef.current) || null;
+    }
+    if (pinnedVoiceRef.current) u.voice = pinnedVoiceRef.current;
     u.onstart = () => setSpeaking(true);
     u.onend = () => { setSpeaking(false); resolve(); };
     u.onerror = () => { setSpeaking(false); resolve(); };
@@ -363,7 +434,7 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
       await speak(toSpeak);
       if (!cancelled) startAutoListenAfterQuestionRef.current();
     })();
-    return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); };
+    return () => { cancelled = true; if (window.speechSynthesis) window.speechSynthesis.cancel(); if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; } };
   }, [phase, script, interviewStarted, translateHrScriptLine, phaseIdx]);
   useEffect(() => {
     if (!script || phase === "load" || phase === "err" || phase === "ai") return;
@@ -590,6 +661,7 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
   const sendAnswer = (text) => dispatchAnswer(text);
   const endInterview = async () => {
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
     suppressSpeechFinalizeRef.current = true;
     autoListenActiveRef.current = false;
     intentionalStopRef.current = false;

@@ -47,7 +47,21 @@ export function Jobs({ jobs, applicationHistory = [], onApply, onContinueIntervi
           {jobBoardAuth}
         </div>
       </div>
-      <div className="max-w-4xl mx-auto px-6 py-8">
+      <section className="relative w-full">
+        <img
+          src="/heropage.png"
+          alt="IndiraIVF Careers — SMART Jobs! SMART Hire!"
+          className="w-full h-[55vh] md:h-[80vh] object-cover object-center"
+        />
+        <a
+          href="#openings"
+          className="absolute bottom-5 left-1/2 -translate-x-1/2 inline-flex flex-col items-center gap-1 text-brand-red font-bold text-xs md:text-sm uppercase tracking-wide"
+        >
+          View Open Roles
+          <span aria-hidden className="text-3xl animate-bounce">↓</span>
+        </a>
+      </section>
+      <div id="openings" className="w-full px-6 md:px-10 py-8 scroll-mt-4">
         <h1 className="text-3xl font-black text-slate-900 mb-2">We’re Hiring🚀</h1>
         <p className="text-slate-500 mb-5">Indira IVF — India's Leading Fertility Healthcare Chain</p>
         <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search jobs…" className="w-full px-4 py-3 bg-white border border-slate-200 rounded-xl mb-4 shadow-sm focus:outline-none focus:border-indigo-400"/>

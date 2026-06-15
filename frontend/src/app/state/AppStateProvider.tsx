@@ -606,10 +606,34 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     clearGuestJobApplyStorage();
   }, []);
 
-  const finalizeGuestJobApply = useCallback(async () => {
+  const finalizeGuestJobApply = useCallback(async ({ mode = "login" } = {}) => {
     let pending = guestJobApplyRef.current;
     if (!pending) pending = loadGuestJobApplyFromStorage();
     if (!pending?.jobId || !pending?.cvFile) return false;
+
+    // Identity safety: a pending guest CV must only ever be submitted to the
+    // account of the person who uploaded it. A fresh registration right after
+    // the upload is that person; an arbitrary login may not be.
+    const GUEST_APPLY_MAX_AGE_MS = 30 * 60 * 1000;
+    const age = pending.createdAt ? Date.now() - pending.createdAt : Infinity;
+    if (age > GUEST_APPLY_MAX_AGE_MS) {
+      guestJobApplyRef.current = null;
+      clearGuestJobApplyStorage();
+      return false;
+    }
+    if (mode === "login") {
+      const fileName = pending.cvFile?.name || "your uploaded resume";
+      const jt = pending.jobTitle || "the selected job";
+      const ok = window.confirm(
+        `A resume "${fileName}" was uploaded in this browser for "${jt}".\n\n` +
+          `Is it yours? OK submits it as YOUR application; Cancel discards it.`,
+      );
+      if (!ok) {
+        guestJobApplyRef.current = null;
+        clearGuestJobApplyStorage();
+        return false;
+      }
+    }
 
     guestJobApplyRef.current = null;
     clearGuestJobApplyStorage();
@@ -666,6 +690,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       jobTitle: selJob.title,
       cvFile: file,
       cvText: file.cvText || "",
+      createdAt: Date.now(),
     };
     guestJobApplyRef.current = pending;
     persistGuestJobApply(pending);

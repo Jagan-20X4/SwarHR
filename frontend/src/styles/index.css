@@ -9,3 +9,24 @@ body {
   font-family: "DM Sans", system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Hide scrollbar but keep scrolling functional */
+html {
+  scrollbar-width: none;        /* Firefox */
+  -ms-overflow-style: none;     /* IE / old Edge */
+}
+
+html::-webkit-scrollbar {
+  display: none;                /* Chrome, Safari, Edge (Chromium) */
+}
+
+@keyframes splashPulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.18); }
+  100% { transform: scale(1); }
+}
+
+.splash-heartbeat {
+  animation: splashPulse 1.4s ease-in-out infinite;
+  will-change: transform;
+}
