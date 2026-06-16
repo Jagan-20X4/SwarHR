@@ -20,6 +20,7 @@ import {
   HrTalentPoolPage,
   HrAuditPage,
   HrReattemptsPage,
+  HrReschedulesPage,
   HrAnalysisPage,
   CvAnalyserRoutePage,
 } from "@/app/pages/hrPages";
@@ -98,6 +99,7 @@ export function AppRoutes() {
             <Route path="talent-pool" element={<HrTalentPoolPage />} />
             <Route path="audit" element={<HrAuditPage />} />
             <Route path="reattempts" element={<HrReattemptsPage />} />
+            <Route path="reschedules" element={<HrReschedulesPage />} />
             <Route path="analysis/:candidateId" element={<HrAnalysisPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />

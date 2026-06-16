@@ -524,6 +524,9 @@ async function loadOneCandidate(client, id) {
               reattempt_candidate_reason_code, reattempt_candidate_reason_text,
               reattempt_hr_reason_code, reattempt_hr_notes,
               reattempt_requested_at, reattempt_resolved_at, reattempt_resolved_by_hr_id,
+              reschedule_request_status, reschedule_candidate_reason_code,
+              reschedule_candidate_reason_text, reschedule_hr_notes,
+              reschedule_requested_at, reschedule_resolved_at, reschedule_resolved_by_hr_id,
               hr_remarks, hr_decision_status, ai_analysis_json
        FROM application WHERE candidate_id = $1 ORDER BY applied_at`,
       [id],
@@ -672,6 +675,17 @@ async function loadOneCandidate(client, id) {
         ? new Date(r.reattempt_resolved_at).toISOString()
         : undefined,
       reattemptResolvedByHrId: r.reattempt_resolved_by_hr_id || undefined,
+      rescheduleRequestStatus: r.reschedule_request_status || "none",
+      rescheduleCandidateReasonCode: r.reschedule_candidate_reason_code || undefined,
+      rescheduleCandidateReasonText: r.reschedule_candidate_reason_text || undefined,
+      rescheduleHrNotes: r.reschedule_hr_notes || undefined,
+      rescheduleRequestedAt: r.reschedule_requested_at
+        ? new Date(r.reschedule_requested_at).toISOString()
+        : undefined,
+      rescheduleResolvedAt: r.reschedule_resolved_at
+        ? new Date(r.reschedule_resolved_at).toISOString()
+        : undefined,
+      rescheduleResolvedByHrId: r.reschedule_resolved_by_hr_id || undefined,
     };
     if (!hasPerAppHrCols) return withReattempt;
     const appAi = parseApplicationAiAnalysis(r.ai_analysis_json);

@@ -36,7 +36,7 @@ export async function callClaude(
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
+          model: "claude-opus-4-8",
           max_tokens: 1000,
           system: system || undefined,
           messages,

@@ -14,6 +14,7 @@ import { Screening } from "@/features/hr/components/Screening";
 import { TalentPoolBrowse } from "@/features/talent-pool/components/TalentPoolBrowse";
 import { AuditLogView } from "@/features/audit/components/AuditLogView";
 import { ReattemptQueue } from "@/features/hr/components/ReattemptQueue";
+import { RescheduleQueue } from "@/features/hr/components/RescheduleQueue";
 import { Analysis } from "@/features/hr/components/Analysis";
 import { CVAnalyserPage } from "@/features/cv-analyser/pages/CvAnalyserPage";
 import { useAppState } from "@/app/state/AppStateProvider";
@@ -31,6 +32,7 @@ export function HrDashboardPage() {
   const {
     jobs,
     reattemptPendingCount,
+    reschedulePendingCount,
     setActiveId,
     setSelJob,
     setAnalysisApplicationId,
@@ -45,6 +47,7 @@ export function HrDashboardPage() {
     <HRDash
       jobs={jobs}
       reattemptPendingCount={reattemptPendingCount}
+      reschedulePendingCount={reschedulePendingCount}
       onView={(id) => {
         setActiveId(id);
         navigate(`/hr/candidates/${id}`);
@@ -73,6 +76,11 @@ export function HrDashboardPage() {
       onTalentPool={() => navigate("/hr/talent-pool")}
       onAuditLog={() => navigate("/hr/audit")}
       onReattempts={() => navigate("/hr/reattempts")}
+      onReschedules={() => navigate("/hr/reschedules")}
+      onReschedule={(id) => {
+        setActiveId(id);
+        navigate(`/hr/candidates/${id}?reschedule=1`);
+      }}
       onLogout={logout}
     />
   );
@@ -80,6 +88,8 @@ export function HrDashboardPage() {
 
 export function HrCandidateDetailPage() {
   const { candidateId } = useParams();
+  const [searchParams] = useSearchParams();
+  const autoOpenReschedule = searchParams.get("reschedule") === "1";
   const {
     active,
     activeId,
@@ -93,6 +103,7 @@ export function HrCandidateDetailPage() {
     navigate,
     startInterview,
     fetchCandidateForHr,
+    patchCandidateForHr,
   } = useAppState();
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(null);
@@ -167,6 +178,16 @@ export function HrCandidateDetailPage() {
         setAnalysisSessionId((x) => x + 1);
         navigate(`/hr/analysis/${candidate.id}${appId != null ? `?appId=${appId}` : ""}`);
       }}
+      onReschedule={async (applicationId, iso) => {
+        const nextHist = patchApplicationById(candidate.applicationHistory, applicationId, {
+          interviewScheduledAt: iso,
+          interviewCompletionStatus: "not_started",
+        });
+        const merged = { ...candidate, applicationHistory: nextHist };
+        upd({ applicationHistory: nextHist });
+        await patchCandidateForHr(candidate.id, merged);
+      }}
+      autoOpenReschedule={autoOpenReschedule}
       onBack={() => navigate("/hr")}
     />
   );
@@ -240,6 +261,22 @@ export function HrReattemptsPage() {
   const { navigate, refreshReattemptCount, syncStateFromServer } = useAppState();
   return (
     <ReattemptQueue
+      onBack={() => {
+        navigate("/hr");
+        refreshReattemptCount();
+      }}
+      onResolved={async () => {
+        await syncStateFromServer();
+        await refreshReattemptCount();
+      }}
+    />
+  );
+}
+
+export function HrReschedulesPage() {
+  const { navigate, refreshReattemptCount, syncStateFromServer } = useAppState();
+  return (
+    <RescheduleQueue
       onBack={() => {
         navigate("/hr");
         refreshReattemptCount();

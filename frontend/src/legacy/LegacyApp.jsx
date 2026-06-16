@@ -780,7 +780,7 @@ function Login({ onCandSuccess, onHrSuccess, onRegister, onForgot, coolingMonths
               {role === "hr" && (
                 <div>
                   <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Password</label>
-                  <input type="password" value={hrPw} onChange={e => { setHrPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="HR Password" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/>
+                  <input type="password" value={hrPw} onChange={e => { setHrPw(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && submit()} placeholder="Password" className="w-full px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white focus:outline-none focus:border-indigo-500"/>
                 </div>
               )}
               {err && <p className="text-red-400 text-sm">⚠ {err}</p>}

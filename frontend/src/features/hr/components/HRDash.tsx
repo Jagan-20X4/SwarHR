@@ -5,6 +5,7 @@ import {
   getLatestAppForJob,
   candidateHasAnyInterviewTranscript,
   activeRoleHasTranscript,
+  interviewStartSlotStatus,
   SB,
 } from "@/legacy/helpersModule";
 import { Badge } from "@/shared/components/ui/Badge";
@@ -20,6 +21,7 @@ const PAGE_SIZE = 50;
 export function HRDash({
   jobs,
   reattemptPendingCount,
+  reschedulePendingCount,
   onView,
   onInterview,
   onAnalysis,
@@ -29,6 +31,8 @@ export function HRDash({
   onTalentPool,
   onAuditLog,
   onReattempts,
+  onReschedules,
+  onReschedule,
   onLogout,
 }) {
   const [filter, setFilter] = useState("ALL");
@@ -185,6 +189,19 @@ export function HRDash({
             reattemptPendingCount > 0 ? (
               <span className="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center">
                 {reattemptPendingCount > 9 ? "9+" : reattemptPendingCount}
+              </span>
+            ) : null}
+          </button>
+          <button
+            type="button"
+            onClick={onReschedules}
+            className="px-3 py-1.5 bg-rose-800 hover:bg-rose-700 hover:-translate-y-0.5 text-white rounded-lg text-sm font-medium transition-transform relative"
+          >
+            Reschedule
+            {typeof reschedulePendingCount === "number" &&
+            reschedulePendingCount > 0 ? (
+              <span className="absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 bg-red-500 text-white text-[10px] font-black rounded-full flex items-center justify-center">
+                {reschedulePendingCount > 9 ? "9+" : reschedulePendingCount}
               </span>
             ) : null}
           </button>
@@ -366,6 +383,19 @@ export function HRDash({
                       Analysis
                     </button>
                   )}
+                  {typeof onReschedule === "function" &&
+                    c.consent &&
+                    schedFor(c) &&
+                    interviewStartSlotStatus(schedFor(c), false).tooLate &&
+                    !c.interviewCompletedAt &&
+                    !candidateHasAnyInterviewTranscript(c) && (
+                      <button
+                        onClick={() => onReschedule(c.id)}
+                        className="flex-1 py-2 bg-rose-600 text-white text-xs font-bold rounded-lg"
+                      >
+                        Reschedule
+                      </button>
+                    )}
                 </div>
               </div>
             ))}

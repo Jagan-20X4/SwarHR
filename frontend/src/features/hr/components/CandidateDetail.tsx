@@ -12,19 +12,27 @@ import {
   transcriptAvailableForJob,
   portalStatusLabel,
   applicationVoiceInterviewCompleted,
+  interviewStartSlotStatus,
   SB,
   apiFetchInit,
 } from "@/legacy/helpersModule";
 import { Badge } from "@/shared/components/ui/Badge";
-import { InterviewTranscriptPanel } from "@/features/hr/components/InterviewTranscriptPanel";
+import { InterviewTranscriptPanel, buildTranscriptSections } from "@/features/hr/components/InterviewTranscriptPanel";
+import { InterviewScheduleModal } from "@/features/hr/components/InterviewScheduleModal";
 import { hrResetCandidatePassword } from "@/shared/api/candidatesApi";
-export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnalysis, onBack }) {
+import { exportTranscriptPdf } from "@/shared/pdf/exportPdf";
+export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnalysis, onReschedule, autoOpenReschedule = false, onBack }) {
   const [showCV, setShowCV] = useState(false), [showTranscript, setShowTranscript] = useState(true), [remarks, setRemarks] = useState(candidate.remarks || ""), [flash, setFlash] = useState("");
   const [newPw, setNewPw] = useState(""), [confirmPw, setConfirmPw] = useState(""), [pwErr, setPwErr] = useState(""), [pwBusy, setPwBusy] = useState(false);
   const [detailTab, setDetailTab] = useState("timeline");
   const [interviewAns, setInterviewAns] = useState(null);
   const [interviewLoading, setInterviewLoading] = useState(false);
   const [selectedApplicationId, setSelectedApplicationId] = useState(null);
+  const [showReschedule, setShowReschedule] = useState(false);
+  const [rescheduleBusy, setRescheduleBusy] = useState(false);
+  useEffect(() => {
+    if (autoOpenReschedule) setShowReschedule(true);
+  }, [autoOpenReschedule]);
   const appliedList = (candidate.applicationHistory || []).map(a => ({ ...a, job: jobs.find(j => j.id === a.jobId) })).filter(a => a.job);
   useEffect(() => {
     const valid = new Set((candidate.applicationHistory || []).map((a) => a.applicationId).filter((id) => id != null));
@@ -106,6 +114,17 @@ export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnal
       .finally(() => setInterviewLoading(false));
   }, [detailTab, selectedApplicationId]);
   const interviewAnswers = interviewAns?.answers || [];
+  const hasTranscriptData =
+    interviewAnswers.length > 0 || (bubbleTranscript || []).length > 0;
+  const handleExportTranscript = () => {
+    const sections = buildTranscriptSections(interviewAnswers, bubbleTranscript || []);
+    exportTranscriptPdf({
+      candidateName: candidate.name,
+      jobTitle: selectedAppRow?.job?.title || "Role",
+      lang: candidate.lang,
+      sections,
+    });
+  };
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="bg-slate-900 text-white px-6 py-4 flex items-center gap-3"><button type="button" onClick={onBack} className="text-slate-400 hover:text-white text-sm">← Back</button><span className="font-bold">Candidate Details</span><Badge/></div>
@@ -154,6 +173,12 @@ export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnal
                 </div>
               </button>
             ))}</div>
+            {typeof onReschedule === "function" && candidate.consent && selectedAppRow && selectedApplicationId != null && selectedAppRow.interviewScheduledAt && interviewStartSlotStatus(selectedAppRow.interviewScheduledAt, false).tooLate && !applicationVoiceInterviewCompleted(selectedAppRow) && portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) !== "REJECTED" ? (
+              <div className="mt-3 pt-3 border-t border-slate-100 flex items-center justify-between flex-wrap gap-2">
+                <p className="text-xs text-slate-500">{selectedAppRow.interviewScheduledAt ? "Candidate missed or needs a new slot? Set a new interview time." : "Set an interview time for this role."}</p>
+                <button type="button" onClick={() => setShowReschedule(true)} className="px-3 py-2 bg-rose-600 hover:bg-rose-500 text-white text-sm font-bold rounded-xl shrink-0">📅 Reschedule interview</button>
+              </div>
+            ) : null}
           </div>
         )}
         {candidate.cv && (
@@ -174,6 +199,11 @@ export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnal
         )}
         {selectedApplicationId != null ? (
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+            {hasTranscriptData ? (
+              <div className="flex justify-end mb-3">
+                <button type="button" onClick={handleExportTranscript} className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg">⬇ Export PDF</button>
+              </div>
+            ) : null}
             <InterviewTranscriptPanel
               jobTitle={selectedAppRow?.job?.title}
               lang={candidate.lang}
@@ -206,6 +236,11 @@ export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnal
               </button>{" "}
               tab for the selected application.
             </p>
+            {selectedApplicationId != null && hasTranscriptData ? (
+              <div className="flex justify-end">
+                <button type="button" onClick={handleExportTranscript} className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg">⬇ Export PDF</button>
+              </div>
+            ) : null}
             {selectedApplicationId != null && (
               <InterviewTranscriptPanel
                 jobTitle={selectedAppRow?.job?.title}
@@ -239,12 +274,36 @@ export function CandidateDetail({ candidate, jobs, onUpdate, onInterview, onAnal
             {(portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) === "INTERVIEWED" || analysisForSelected) && (
               <button type="button" onClick={() => typeof onAnalysis === "function" && onAnalysis(selectedApplicationId)} className="py-2.5 bg-teal-600 text-white font-bold rounded-xl text-sm">📊 Analysis</button>
             )}
+            {typeof onReschedule === "function" && candidate.consent && selectedAppRow && selectedApplicationId != null && selectedAppRow.interviewScheduledAt && interviewStartSlotStatus(selectedAppRow.interviewScheduledAt, false).tooLate && !applicationVoiceInterviewCompleted(selectedAppRow) && portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) !== "REJECTED" && (
+              <button type="button" onClick={() => setShowReschedule(true)} className="py-2.5 bg-rose-600 text-white font-bold rounded-xl text-sm">📅 Reschedule</button>
+            )}
             {portalStatusLabel(candidate, selectedAppRow?.jobId || candidate.jobId) !== "REJECTED" && candidate.status !== "WITHDRAWN" && <button type="button" onClick={() => { if (window.confirm("Reject this application?")) setStatus("REJECTED"); }} className="py-2.5 border-2 border-red-100 text-red-600 font-bold rounded-xl text-sm">✕ Reject</button>}
           </div>
         </div>
         </>
         ) : null}
       </div>
+      {showReschedule && (
+        <InterviewScheduleModal
+          jobTitle={selectedAppRow?.job?.title}
+          busy={rescheduleBusy}
+          onCancel={() => !rescheduleBusy && setShowReschedule(false)}
+          onConfirm={async (iso) => {
+            if (selectedApplicationId == null) return;
+            setRescheduleBusy(true);
+            try {
+              await onReschedule(selectedApplicationId, iso);
+              setShowReschedule(false);
+              setFlash(`Interview rescheduled to ${fmtDateTime(iso)}`);
+              setTimeout(() => setFlash(""), 5000);
+            } catch (e) {
+              window.alert("Could not reschedule. Please try again.");
+            } finally {
+              setRescheduleBusy(false);
+            }
+          }}
+        />
+      )}
     </div>
   );
 }

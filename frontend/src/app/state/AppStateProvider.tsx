@@ -88,6 +88,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
   const [jobs, setJobs] = useState([]), [candidates, setCandidates] = useState([]), [talentPool, setTalentPool] = useState([]), [auditLog, setAuditLog] = useState([]);
   const [hrUsers, setHrUsers] = useState({});
   const [reattemptPendingCount, setReattemptPendingCount] = useState(0);
+  const [reschedulePendingCount, setReschedulePendingCount] = useState(0);
   const [meta, setMeta] = useState(null);
   const [storageReady, setStorageReady] = useState(false);
   const [canPersist, setCanPersist] = useState(false);
@@ -132,6 +133,13 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       if (r.ok) {
         const j = await r.json();
         setReattemptPendingCount(j.count ?? 0);
+      }
+    } catch (_) {}
+    try {
+      const r2 = await fetch("/api/admin/reschedule-pending-count", apiFetchInit());
+      if (r2.ok) {
+        const j2 = await r2.json();
+        setReschedulePendingCount(j2.count ?? 0);
       }
     } catch (_) {}
   };
@@ -783,6 +791,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       setAuditLog,
       hrUsers,
       reattemptPendingCount,
+      reschedulePendingCount,
       meta,
       storageReady,
       canPersist,
@@ -853,6 +862,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       auditLog,
       hrUsers,
       reattemptPendingCount,
+      reschedulePendingCount,
       meta,
       storageReady,
       canPersist,

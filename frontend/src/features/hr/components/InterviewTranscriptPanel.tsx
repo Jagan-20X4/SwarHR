@@ -85,6 +85,37 @@ export function extractAiFollowUpFromChat(chatLines, answers) {
   return extras;
 }
 
+/** Merged phase sections (stored Q&A + AI follow-up extracted from chat). Shared by the panel and PDF export. */
+export function buildTranscriptSections(answers, chatLines) {
+  const aiExtras = extractAiFollowUpFromChat(chatLines, answers);
+  const base = groupInterviewAnswersByPhase(answers);
+  if (aiExtras.length > 0) {
+    const existing = base.find((s) => s.phase === "ai_followup");
+    if (existing) {
+      existing.items = [
+        ...existing.items,
+        ...aiExtras.map((x, i) => ({
+          ...x,
+          index: existing.items.length + i + 1,
+          _phase: "ai_followup",
+        })),
+      ];
+    } else {
+      base.push({
+        phase: "ai_followup",
+        label: PHASE_LABELS.ai_followup,
+        items: aiExtras.map((x, i) => ({
+          ...x,
+          index: i + 1,
+          _phase: "ai_followup",
+        })),
+      });
+      base.sort((a, b) => PHASE_ORDER.indexOf(a.phase) - PHASE_ORDER.indexOf(b.phase));
+    }
+  }
+  return base;
+}
+
 function Bubble({ role, text, sub }) {
   const isAi = role === "ai";
   return (
@@ -119,36 +150,10 @@ export function InterviewTranscriptPanel({
     [chatLines, answers],
   );
 
-  const sections = useMemo(() => {
-    const base = groupInterviewAnswersByPhase(answers);
-    if (aiExtras.length > 0) {
-      const existing = base.find((s) => s.phase === "ai_followup");
-      if (existing) {
-        existing.items = [
-          ...existing.items,
-          ...aiExtras.map((x, i) => ({
-            ...x,
-            index: existing.items.length + i + 1,
-            _phase: "ai_followup",
-          })),
-        ];
-      } else {
-        base.push({
-          phase: "ai_followup",
-          label: PHASE_LABELS.ai_followup,
-          items: aiExtras.map((x, i) => ({
-            ...x,
-            index: i + 1,
-            _phase: "ai_followup",
-          })),
-        });
-        base.sort(
-          (a, b) => PHASE_ORDER.indexOf(a.phase) - PHASE_ORDER.indexOf(b.phase),
-        );
-      }
-    }
-    return base;
-  }, [answers, aiExtras]);
+  const sections = useMemo(
+    () => buildTranscriptSections(answers, chatLines),
+    [answers, chatLines],
+  );
 
   const totalQuestions = (answers || []).length + aiExtras.length;
   const msgCount = chatLines?.length || totalQuestions * 2;

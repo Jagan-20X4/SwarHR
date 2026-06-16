@@ -594,6 +594,99 @@ function createVoiceBotRouter(pool) {
     }
   });
 
+  r.post("/reschedule-request", auth, async (req, res) => {
+    const applicationId = parseInt(req.body?.applicationId, 10);
+    const candidateReasonCode = req.body?.candidateReasonCode
+      ? String(req.body.candidateReasonCode).slice(0, 64)
+      : "";
+    const candidateReasonText = req.body?.candidateReasonText
+      ? String(req.body.candidateReasonText).slice(0, 4000)
+      : "";
+    if (!Number.isFinite(applicationId) || !candidateReasonCode) {
+      res
+        .status(400)
+        .json({ error: "applicationId and candidateReasonCode required" });
+      return;
+    }
+    const client = await pool.connect();
+    try {
+      const appRes = await client.query(
+        `SELECT id, candidate_id, interview_scheduled_at, interview_completed_at, reschedule_request_status
+         FROM application WHERE id = $1`,
+        [applicationId],
+      );
+      if (appRes.rows.length === 0) {
+        res.status(404).json({ error: "Application not found" });
+        return;
+      }
+      const row = appRes.rows[0];
+      if (!req.voiceBotService && row.candidate_id !== req.candidateId) {
+        res.status(403).json({ error: "Forbidden" });
+        return;
+      }
+      const rs = row.reschedule_request_status || "none";
+      if (rs === "pending") {
+        res.status(409).json({ error: "Reschedule request already pending" });
+        return;
+      }
+      if (row.interview_completed_at) {
+        res.status(400).json({ error: "Interview already completed for this application" });
+        return;
+      }
+      // Reschedule is only available once the scheduled window has closed (missed slot).
+      const schedMs = row.interview_scheduled_at
+        ? new Date(row.interview_scheduled_at).getTime()
+        : NaN;
+      const graceMs = 15 * 60 * 1000;
+      const windowClosed =
+        Number.isFinite(schedMs) && Date.now() >= schedMs + graceMs;
+      if (!windowClosed) {
+        res.status(400).json({
+          error:
+            "Reschedule can only be requested after the scheduled interview window has closed",
+        });
+        return;
+      }
+      await client.query(
+        `UPDATE application SET
+           reschedule_request_status = 'pending',
+           reschedule_candidate_reason_code = $2,
+           reschedule_candidate_reason_text = $3,
+           reschedule_requested_at = NOW(),
+           reschedule_hr_notes = NULL,
+           reschedule_resolved_at = NULL,
+           reschedule_resolved_by_hr_id = NULL
+         WHERE id = $1 AND reschedule_request_status IN ('none', 'rejected')`,
+        [applicationId, candidateReasonCode, candidateReasonText || null],
+      );
+      await client.query(
+        `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
+         VALUES ($1, NOW(), $2, $3, $4, $5)`,
+        [
+          auditId(),
+          row.candidate_id,
+          "interview.reschedule_requested",
+          `application:${applicationId}`,
+          JSON.stringify({
+            applicationId,
+            candidateReasonCode,
+            hasText: Boolean(candidateReasonText),
+          }),
+        ],
+      );
+      res.json({ ok: true, applicationId });
+    } catch (e) {
+      if (e.code === "42703") {
+        res.status(503).json({ error: "Reschedule migration not applied" });
+        return;
+      }
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    } finally {
+      client.release();
+    }
+  });
+
   return r;
 }
 
@@ -822,6 +915,147 @@ function createAdminInterviewRouter(pool) {
         await client.query("ROLLBACK");
         if (e.code === "42703") {
           res.status(503).json({ error: "Reattempt migration not applied" });
+          return;
+        }
+        console.error(e);
+        res.status(500).json({ error: String(e.message || e) });
+      } finally {
+        client.release();
+      }
+    },
+  );
+
+  r.get("/reschedule-pending-count", requireHr, async (_req, res) => {
+    const client = await pool.connect();
+    try {
+      const r0 = await client.query(
+        `SELECT COUNT(*)::int AS n FROM application WHERE reschedule_request_status = 'pending'`,
+      );
+      res.json({ count: r0.rows[0]?.n ?? 0 });
+    } catch (e) {
+      if (e.code === "42703") {
+        res.json({ count: 0 });
+        return;
+      }
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    } finally {
+      client.release();
+    }
+  });
+
+  r.get("/reschedule-pending", requireHr, async (_req, res) => {
+    const client = await pool.connect();
+    try {
+      const rows = await client.query(
+        `SELECT a.id AS "applicationId", a.candidate_id AS "candidateId", a.job_id AS "jobId",
+                a.reschedule_requested_at AS "requestedAt",
+                a.reschedule_candidate_reason_code AS "candidateReasonCode",
+                a.reschedule_candidate_reason_text AS "candidateReasonText",
+                a.interview_scheduled_at AS "interviewScheduledAt",
+                c.name AS "candidateName", c.email AS "candidateEmail",
+                j.title AS "jobTitle"
+         FROM application a
+         JOIN candidate c ON c.id = a.candidate_id
+         LEFT JOIN job j ON j.id = a.job_id
+         WHERE a.reschedule_request_status = 'pending'
+         ORDER BY a.reschedule_requested_at DESC NULLS LAST, a.id DESC`,
+      );
+      res.json({ items: rows.rows });
+    } catch (e) {
+      if (e.code === "42703") {
+        res.json({ items: [] });
+        return;
+      }
+      console.error(e);
+      res.status(500).json({ error: String(e.message || e) });
+    } finally {
+      client.release();
+    }
+  });
+
+  r.post(
+    "/applications/:applicationId/reschedule-resolve",
+    requireHr,
+    async (req, res) => {
+      const applicationId = parseInt(req.params.applicationId, 10);
+      const decision = String(req.body?.decision || "").toLowerCase();
+      const hrNotes = req.body?.hrNotes
+        ? String(req.body.hrNotes).slice(0, 4000)
+        : "";
+      if (!Number.isFinite(applicationId) || !["approve", "reject"].includes(decision)) {
+        res.status(400).json({ error: "decision must be approve or reject" });
+        return;
+      }
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        const appRes = await client.query(
+          `SELECT id, candidate_id, reschedule_request_status FROM application WHERE id = $1`,
+          [applicationId],
+        );
+        if (appRes.rows.length === 0) {
+          await client.query("ROLLBACK");
+          res.status(404).json({ error: "Application not found" });
+          return;
+        }
+        const appRow = appRes.rows[0];
+        if (appRow.reschedule_request_status !== "pending") {
+          await client.query("ROLLBACK");
+          res.status(409).json({ error: "No pending reschedule for this application" });
+          return;
+        }
+        if (decision === "approve") {
+          await client.query(
+            `UPDATE application SET
+               interview_scheduled_at = NULL,
+               interview_completion_status = 'not_started',
+               interview_completed_at = NULL,
+               reschedule_request_status = 'none',
+               reschedule_candidate_reason_code = NULL,
+               reschedule_candidate_reason_text = NULL,
+               reschedule_requested_at = NULL,
+               reschedule_hr_notes = $2,
+               reschedule_resolved_at = NOW(),
+               reschedule_resolved_by_hr_id = $3,
+               schedule_email_sent_for_at = NULL
+             WHERE id = $1`,
+            [applicationId, hrNotes || null, req.hrId],
+          );
+        } else {
+          await client.query(
+            `UPDATE application SET
+               reschedule_request_status = 'rejected',
+               reschedule_hr_notes = $2,
+               reschedule_resolved_at = NOW(),
+               reschedule_resolved_by_hr_id = $3
+             WHERE id = $1`,
+            [applicationId, hrNotes || null, req.hrId],
+          );
+        }
+        await client.query(
+          `INSERT INTO audit_event (id, occurred_at, actor, action, target_ref, details)
+           VALUES ($1, NOW(), $2, $3, $4, $5)`,
+          [
+            auditId(),
+            req.hrId,
+            decision === "approve"
+              ? "interview.reschedule_approved"
+              : "interview.reschedule_rejected",
+            `application:${applicationId}`,
+            JSON.stringify({
+              applicationId,
+              candidateId: appRow.candidate_id,
+              hasNotes: Boolean(hrNotes),
+            }),
+          ],
+        );
+        await client.query("COMMIT");
+        res.json({ ok: true, applicationId, decision });
+      } catch (e) {
+        await client.query("ROLLBACK");
+        if (e.code === "42703") {
+          res.status(503).json({ error: "Reschedule migration not applied" });
           return;
         }
         console.error(e);

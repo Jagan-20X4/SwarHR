@@ -9,9 +9,11 @@ import {
   formatInterviewCountdown,
   INTERVIEW_SLOT_CLOSED_MESSAGE,
   applicationEligibleForTechnicalReattemptRequest,
+  applicationEligibleForRescheduleRequest,
   portalStatusLabel,
   SB,
   CANDIDATE_REATTEMPT_REASONS,
+  CANDIDATE_RESCHEDULE_REASONS,
 } from "@/legacy/helpersModule";
 import { Badge } from "@/shared/components/ui/Badge";
 export function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, onApply, onTalentPool, onInterview, onRights, onLogout, talentPoolSelected, onSync, scheduleFlash = null }) {
@@ -53,6 +55,37 @@ export function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, 
   }, [schedAt, latestApp?.interviewCompletedAt]);
   void clockTick;
   const canRequestReattempt = latestApp ? applicationEligibleForTechnicalReattemptRequest(latestApp) : false;
+  const [rsCode, setRsCode] = useState("MISSED_EMERGENCY");
+  const [rsText, setRsText] = useState("");
+  const [rsBusy, setRsBusy] = useState(false);
+  const canRequestReschedule = latestApp
+    ? applicationEligibleForRescheduleRequest(latestApp, !!interviewSlotClosed)
+    : false;
+  const submitReschedule = async () => {
+    if (!latestApp?.applicationId) return;
+    setRsBusy(true);
+    try {
+      const r = await fetch("/api/voice-bot/reschedule-request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          applicationId: latestApp.applicationId,
+          candidateReasonCode: rsCode,
+          candidateReasonText: rsText.trim(),
+        }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        window.alert(j.error || "Could not submit reschedule request");
+      } else {
+        window.alert("Reschedule request submitted. HR will review and set a new interview time.");
+        setRsText("");
+        if (typeof onSync === "function") await onSync();
+      }
+    } finally {
+      setRsBusy(false);
+    }
+  };
   const submitReattempt = async () => {
     if (!latestApp?.applicationId) return;
     setRrBusy(true);
@@ -152,7 +185,25 @@ export function CandDash({ candidate, jobs, portalFocusJobId, onPortalFocusJob, 
               </div>
             ) : null}
             {canInterviewBtn && interviewSlotClosed ? (
-              <p className="w-full py-3 px-4 bg-amber-50 border border-amber-200 text-amber-900 text-sm font-semibold rounded-xl text-center leading-snug">{INTERVIEW_SLOT_CLOSED_MESSAGE}</p>
+              <div className="space-y-2">
+                <p className="w-full py-3 px-4 bg-amber-50 border border-amber-200 text-amber-900 text-sm font-semibold rounded-xl text-center leading-snug">{INTERVIEW_SLOT_CLOSED_MESSAGE}</p>
+                {latestApp?.rescheduleRequestStatus === "pending" ? (
+                  <div className="bg-slate-100 border border-slate-200 rounded-xl p-3 text-xs text-slate-700 font-semibold">✓ Under Review — reschedule request pending HR approval. HR will set a new interview time.</div>
+                ) : null}
+                {latestApp?.rescheduleRequestStatus === "rejected" ? (
+                  <div className="bg-red-50 border border-red-100 rounded-xl p-3 text-xs text-red-800">Your last reschedule request was not approved for this role. You may submit a new request if your situation changed.</div>
+                ) : null}
+                {canRequestReschedule ? (
+                  <div className="bg-white border border-indigo-200 rounded-xl p-4 space-y-2">
+                    <p className="text-xs font-black text-slate-500 uppercase">Apply for reschedule · this role</p>
+                    <select value={rsCode} onChange={(e) => setRsCode(e.target.value)} className="w-full border rounded-lg px-3 py-2 text-sm">
+                      {CANDIDATE_RESCHEDULE_REASONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <textarea value={rsText} onChange={(e) => setRsText(e.target.value)} rows={2} placeholder="Short details (optional)" className="w-full border rounded-lg px-3 py-2 text-sm resize-none" />
+                    <button type="button" disabled={rsBusy} onClick={submitReschedule} className="w-full py-2 bg-indigo-600 text-white text-sm font-bold rounded-lg disabled:bg-slate-300">{rsBusy ? "Sending…" : "Submit reschedule request to HR"}</button>
+                  </div>
+                ) : null}
+              </div>
             ) : canInterviewBtn && interviewCountdown ? (
               <button type="button" disabled className="w-full py-3 bg-slate-200 text-slate-600 font-bold rounded-xl cursor-not-allowed">Starts in {interviewCountdown}</button>
             ) : canInterviewBtn ? (

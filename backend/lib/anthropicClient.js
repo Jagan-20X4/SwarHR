@@ -9,6 +9,9 @@ const {
   buildGenerateJdUserPrompt,
 } = require("./cvAnalyserPrompt");
 
+// Operator-controlled model (backend/.env ANTHROPIC_MODEL); falls back to current default.
+const ANTHROPIC_MODEL = String(process.env.ANTHROPIC_MODEL || "").trim() || "claude-opus-4-8";
+
 function stripJsonFences(raw) {
   let s = String(raw || "").trim();
   s = s.replace(/^\s*```(?:json)?\s*/i, "");
@@ -132,7 +135,7 @@ async function analyzeCvWithClaudePdfBuffer(buf, filename) {
   const client = new Anthropic({ apiKey });
   const data = buf.toString("base64");
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: ANTHROPIC_MODEL,
     max_tokens: 4096,
     temperature: 0.2,
     system: SYSTEM_PROMPT,
@@ -184,7 +187,7 @@ async function analyzeCvWithClaudePdfBufferForJob(buf, filename, job) {
   const client = new Anthropic({ apiKey });
   const data = buf.toString("base64");
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: ANTHROPIC_MODEL,
     max_tokens: 4096,
     temperature: 0.2,
     system: FIT_SYSTEM_PROMPT,
@@ -235,7 +238,7 @@ async function analyzeCvWithClaudeForJob(extractedText, job) {
   }
   const client = new Anthropic({ apiKey });
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: ANTHROPIC_MODEL,
     max_tokens: 2000,
     temperature: 0.2,
     system: FIT_SYSTEM_PROMPT,
@@ -273,7 +276,7 @@ async function analyzeCvWithClaude(extractedText) {
   }
   const client = new Anthropic({ apiKey });
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: ANTHROPIC_MODEL,
     max_tokens: 1500,
     temperature: 0.2,
     system: SYSTEM_PROMPT,
@@ -311,7 +314,7 @@ async function generateJobDraftClaude(roleTitle) {
   }
   const client = new Anthropic({ apiKey });
   const msg = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: ANTHROPIC_MODEL,
     max_tokens: 1200,
     temperature: 0.35,
     system:

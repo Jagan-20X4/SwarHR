@@ -33,7 +33,7 @@ export async function callInterviewClaude(
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           applicationId,
-          model: "claude-sonnet-4-20250514",
+          model: "claude-opus-4-8",
           max_tokens: 1000,
           system: system || undefined,
           messages,
@@ -67,7 +67,7 @@ export async function callClaude(messages, system = "", json = false) {
       ...apiFetchInit({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: system || undefined, messages }),
+        body: JSON.stringify({ model: "claude-opus-4-8", max_tokens: 1000, system: system || undefined, messages }),
       }),
     });
     const data = await res.json();
@@ -505,7 +505,25 @@ export function interviewEligibleForJob(c, jobId) {
 export const INTERVIEW_START_GRACE_MINUTES = 15;
 export const INTERVIEW_START_GRACE_MS = INTERVIEW_START_GRACE_MINUTES * 60 * 1000;
 export const INTERVIEW_SLOT_CLOSED_MESSAGE =
-  "The scheduled window is closed. Please contact career@indiraivf.in";
+  "The scheduled window is closed. Please apply for reschedule";
+/** Reasons a candidate can give when requesting a reschedule for a missed interview slot. */
+export const CANDIDATE_RESCHEDULE_REASONS = [
+  { value: "MISSED_EMERGENCY", label: "Personal / family emergency" },
+  { value: "MISSED_TECH", label: "Technical / connectivity issue" },
+  { value: "MISSED_UNAVAILABLE", label: "Was unavailable at the scheduled time" },
+  { value: "OTHER", label: "Other (explain in notes)" },
+];
+/** True when the candidate may submit (or re-submit after rejection) a reschedule request — i.e. the scheduled slot window has closed without completing the interview. */
+export function applicationEligibleForRescheduleRequest(app, slotClosed) {
+  if (!app || app.applicationId == null) return false;
+  if (!slotClosed) return false;
+  if (app.interviewCompletedAt) return false;
+  const rs = app.rescheduleRequestStatus || "none";
+  if (rs !== "none" && rs !== "rejected") return false;
+  const hr = app.hrDecisionStatus;
+  if (hr === "SHORTLISTED" || hr === "REJECTED") return false;
+  return true;
+}
 /** When a slot is chosen, Start is only allowed from scheduled time until grace end (unless bypassSchedule). */
 export function interviewStartSlotStatus(scheduledIso, bypassSchedule) {
   if (bypassSchedule || !scheduledIso) {

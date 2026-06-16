@@ -7,6 +7,7 @@ import {
   analysisInterviewMessages,
 } from "@/legacy/helpersModule";
 import { Spin } from "@/shared/components/ui/Spin";
+import { exportAnalysisPdf } from "@/shared/pdf/exportPdf";
 export function Analysis({ context, transcript, savedAnalysis, roleTabs, selectedApplicationId, onSelectApplication, initialRemarks, onDecision, onBack, onLogout, hrDecisionAllowed = true }) {
   const [data, setData] = useState(null), [busy, setBusy] = useState(true), [err, setErr] = useState(null), [remarks, setRemarks] = useState(initialRemarks || "");
   const autoClaudeConsumedRef = useRef(false);
@@ -105,7 +106,7 @@ export function Analysis({ context, transcript, savedAnalysis, roleTabs, selecte
   })();
   return (
     <div className="min-h-screen bg-slate-50">
-      <div className="bg-indigo-900 text-white px-6 py-8"><div className="max-w-4xl mx-auto flex items-start justify-between flex-wrap gap-3"><div><h2 className="text-3xl font-black mb-1">{context.candidateName}</h2><p className="text-indigo-200 text-sm">{context.jd.title}</p></div><div className="flex items-center gap-3"><span className={`px-4 py-2 rounded-xl text-white font-black text-sm ${recC[data.rec] || "bg-blue-500"}`}>{data.rec}</span><button onClick={onLogout} className="text-indigo-300 text-sm">Logout</button></div></div></div>
+      <div className="bg-indigo-900 text-white px-6 py-8"><div className="max-w-4xl mx-auto flex items-start justify-between flex-wrap gap-3"><div><h2 className="text-3xl font-black mb-1">{context.candidateName}</h2><p className="text-indigo-200 text-sm">{context.jd.title}</p></div><div className="flex items-center gap-3"><span className={`px-4 py-2 rounded-xl text-white font-black text-sm ${recC[data.rec] || "bg-blue-500"}`}>{data.rec}</span>{!data.noTranscript && !data.pendingManualGenerate ? <button type="button" onClick={() => exportAnalysisPdf({ candidateName: context.candidateName, jobTitle: context.jd.title, data })} className="px-4 py-2 bg-white/15 hover:bg-white/25 text-white font-bold rounded-xl text-sm">⬇ Export PDF</button> : null}<button onClick={onLogout} className="text-indigo-300 text-sm">Logout</button></div></div></div>
       {showRoleTabs ? (
         <div className="max-w-4xl mx-auto px-6 pt-4 flex flex-wrap gap-2">
           {tabs.map((t) => (

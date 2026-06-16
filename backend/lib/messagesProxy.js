@@ -1,15 +1,24 @@
 const ALLOWED_MODELS = new Set([
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
   "claude-sonnet-4-20250514",
   "claude-3-5-sonnet-20241022",
   "claude-3-5-haiku-20241022",
   "claude-3-haiku-20240307",
 ]);
 
+// Operator-controlled model (backend/.env ANTHROPIC_MODEL). When set, it overrides
+// whatever model the client sends, so the model can be swapped without code changes.
+const ENV_MODEL = String(process.env.ANTHROPIC_MODEL || "").trim();
+if (ENV_MODEL) ALLOWED_MODELS.add(ENV_MODEL);
+
 const MAX_TOKENS_CAP = 8192;
 
 function sanitizeAnthropicBody(body) {
   const raw = body && typeof body === "object" ? body : {};
-  const model = String(raw.model || "").trim();
+  const model = ENV_MODEL || String(raw.model || "").trim();
   if (!model || !ALLOWED_MODELS.has(model)) {
     const err = new Error(
       `model not allowed. Allowed: ${[...ALLOWED_MODELS].join(", ")}`,
