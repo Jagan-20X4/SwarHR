@@ -232,6 +232,92 @@ Talent Acquisition Team`;
   return { subject, body };
 }
 
+function buildRescheduleByHrEmail({ candidateName, jobTitle, scheduledAt, interviewLink }) {
+  const cn = (candidateName && String(candidateName).trim()) || "Candidate";
+  const jt = (jobTitle && String(jobTitle).trim()) || "the position";
+  const link = (interviewLink && String(interviewLink).trim()) || "";
+  const when = formatScheduledAt(scheduledAt);
+  const subject = `Your AI Interview Has Been Rescheduled – ${jt}`;
+  const body = `Dear ${cn},
+
+Thank you for your interest in the ${jt} position at Indira IVF Hospital Ltd.
+
+Your AI interview has been rescheduled by our team.
+
+New Interview Date & Time: ${when}
+
+AI Interview Link: ${link}
+
+Please log in at least 5 minutes before your scheduled time. Your interview window will open at the scheduled time.
+
+Please ensure before you begin:
+
+· A quiet environment with minimal background noise
+
+· Stable internet connectivity
+
+· A well-lit space with a plain white or light-coloured background
+
+· A device with a working camera and microphone
+
+Kindly complete the interview in one continuous session.
+
+We look forward to your participation.
+
+Warm regards,
+Talent Acquisition Team`;
+  return { subject, body };
+}
+
+function buildRescheduleApprovedEmail({ candidateName, jobTitle, interviewLink }) {
+  const cn = (candidateName && String(candidateName).trim()) || "Candidate";
+  const jt = (jobTitle && String(jobTitle).trim()) || "the position";
+  const link = (interviewLink && String(interviewLink).trim()) || "";
+  const subject = `Reschedule Approved – ${jt}`;
+  const body = `Dear ${cn},
+
+Thank you for your interest in the ${jt} position at Indira IVF Hospital Ltd.
+
+Your request to reschedule the AI interview has been approved. Your interview has been reopened, and you may now log in to choose a new time slot that suits you.
+
+AI Interview Link: ${link}
+
+Please ensure before you begin:
+
+· A quiet environment with minimal background noise
+
+· Stable internet connectivity
+
+· A well-lit space with a plain white or light-coloured background
+
+· A device with a working camera and microphone
+
+Kindly complete the interview in one continuous session.
+
+We look forward to your participation.
+
+Warm regards,
+Talent Acquisition Team`;
+  return { subject, body };
+}
+
+function buildRescheduleRejectedEmail({ candidateName, jobTitle }) {
+  const cn = (candidateName && String(candidateName).trim()) || "Candidate";
+  const jt = (jobTitle && String(jobTitle).trim()) || "the position";
+  const subject = `Update on Your Reschedule Request – ${jt}`;
+  const body = `Dear ${cn},
+
+Thank you for your interest in the ${jt} position at Indira IVF Hospital Ltd. and for submitting a request to reschedule your AI interview.
+
+After review, we are unable to approve your reschedule request at this time.
+
+We appreciate your time and interest in Indira IVF Hospital Ltd.
+
+Warm regards,
+Talent Acquisition Team`;
+  return { subject, body };
+}
+
 function normalizeTalentPoolRoles(desiredRoles) {
   if (Array.isArray(desiredRoles)) {
     return desiredRoles.map((r) => String(r).trim()).filter(Boolean);
@@ -334,6 +420,9 @@ module.exports = {
   buildHrRejectEmail,
   buildReattemptApprovedEmail,
   buildReattemptRejectedEmail,
+  buildRescheduleByHrEmail,
+  buildRescheduleApprovedEmail,
+  buildRescheduleRejectedEmail,
   buildTalentPoolJoinEmail,
   buildCvAnalyserInviteEmail,
 };

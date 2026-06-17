@@ -17,6 +17,9 @@ const {
   sendInterviewCompletionEmail,
   sendReattemptApprovedEmail,
   sendReattemptRejectedEmail,
+  sendRescheduleApprovedEmail,
+  sendRescheduleRejectedEmail,
+  sendRescheduleByHrEmail,
 } = require("../lib/interviewEmailService");
 const {
   reattemptDeadlineExpired,
@@ -1051,6 +1054,15 @@ function createAdminInterviewRouter(pool) {
           ],
         );
         await client.query("COMMIT");
+        if (decision === "approve") {
+          void sendRescheduleApprovedEmail(pool, applicationId).catch((err) =>
+            console.error("[reschedule-email]", applicationId, "approve", err),
+          );
+        } else {
+          void sendRescheduleRejectedEmail(pool, applicationId).catch((err) =>
+            console.error("[reschedule-email]", applicationId, "reject", err),
+          );
+        }
         res.json({ ok: true, applicationId, decision });
       } catch (e) {
         await client.query("ROLLBACK");
@@ -1062,6 +1074,29 @@ function createAdminInterviewRouter(pool) {
         res.status(500).json({ error: String(e.message || e) });
       } finally {
         client.release();
+      }
+    },
+  );
+
+  r.post(
+    "/applications/:applicationId/reschedule-notify",
+    requireHr,
+    async (req, res) => {
+      const applicationId = parseInt(req.params.applicationId, 10);
+      if (!Number.isFinite(applicationId)) {
+        res.status(400).json({ error: "Invalid applicationId" });
+        return;
+      }
+      try {
+        const out = await sendRescheduleByHrEmail(pool, applicationId);
+        res.json({ ok: true, applicationId, result: out });
+      } catch (e) {
+        if (e.code === "42703") {
+          res.status(503).json({ error: "Reschedule migration not applied" });
+          return;
+        }
+        console.error("[reschedule-notify]", applicationId, e);
+        res.status(500).json({ error: String(e.message || e) });
       }
     },
   );

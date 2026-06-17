@@ -105,7 +105,9 @@ export function Interview({ context, applicationId, onEnd, onAbandon }) {
       medium: "Difficulty: MEDIUM. Ask standard role competency questions — situational judgement, moderate-complexity scenarios, single-step problem solving, common pitfalls. Probe both knowledge and applied judgement.",
       hard: "Difficulty: HARD. Ask senior-level scenario-based questions — multi-step problems, edge cases, deep technical probing, behavioural STAR with complications. Press on trade-offs, decision-making under constraints, and ownership.",
     }[difficulty];
-    return `You are Swar, a warm HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE role-specific question per turn about skills, experience, or scenarios for THIS job only.
+    return `You are Swar, an HR interviewer. Voice interview for "${context.jd.title}" with ${context.candidateName}. Speak in ${context.language}. <30 words per turn. NO markdown. Ask ONE role-specific question per turn about skills, experience, or scenarios for THIS job only.
+
+Output ONLY the question itself. Do NOT greet, introduce yourself, welcome, thank, or add any preamble or transition phrase. No "Let's begin", no "Great answer", no commentary — just the question.
 
 ${difficultyBlock}
 
@@ -118,7 +120,7 @@ Job description: ${desc}
 Requirements: ${req}
 
 Do NOT ask: introduce yourself, tell me about yourself, why this company, name confirmation, or any topic already covered above.
-After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
+After exactly ${total} follow-up questions, output ONLY "[INTERVIEW_COMPLETE]" with no other words, no goodbye, no summary, no thanks.`;
   };
   const translateHrScriptLine = useCallback(
     async (raw) => {
@@ -462,15 +464,16 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
       if (aiBootRef.current) return;
       aiBootRef.current = true;
       setBusy(true);
+      const bootMsg = "Ask your first role-specific question now. Output only the question.";
       const r0 = await callInterviewClaude(
-        [{ role: "user", content: "Start." }],
+        [{ role: "user", content: bootMsg }],
         buildSysAi(script),
         applicationId,
       );
       if (cancelled) return;
       const clean = r0.replace("[INTERVIEW_COMPLETE]", "").trim();
       setMsgs((p) => [...p, { role: "ai", text: clean, tag: "ai" }]);
-      setHist([{ role: "user", content: "Start." }, { role: "assistant", content: r0 }]);
+      setHist([{ role: "user", content: bootMsg }, { role: "assistant", content: r0 }]);
       setBusy(false);
       await speak(clean);
       if (!cancelled) startAutoListenAfterQuestionRef.current();
@@ -617,19 +620,24 @@ After ${total} follow-up questions, end with [INTERVIEW_COMPLETE].`;
       const h = [...hist, { role: "user", content: answer }];
       setBusy(true);
       const r = await callInterviewClaude(h, buildSysAi(script), applicationId);
+      const done = r.includes("[INTERVIEW_COMPLETE]");
       const clean = r.replace("[INTERVIEW_COMPLETE]", "").trim();
       setHist([...h, { role: "assistant", content: r }]);
-      setAiQCount((c) => c + 1);
       const nextUserTurnCount = prevAiQCount + 1;
+      const isFinalTurn = done || nextUserTurnCount >= MAX_AI;
       setBusy(false);
-      let transcriptOut = null;
-      setMsgs((p) => {
-        const next = [...p, { role: "user", text: answer, tag: "ai" }, { role: "ai", text: clean, tag: "ai" }];
-        transcriptOut = next.map((m) => ({ role: m.role, text: m.text }));
-        return next;
-      });
-      await speak(clean);
-      if (nextUserTurnCount >= MAX_AI && transcriptOut) {
+      // Build the next message list synchronously so we don't depend on the
+      // setMsgs updater having run (which caused a transcript race on empty turns).
+      const newMsgs = [...msgs, { role: "user", text: answer, tag: "ai" }];
+      // Only show/speak a real AI question — never a blank/token-only turn.
+      if (clean) {
+        newMsgs.push({ role: "ai", text: clean, tag: "ai" });
+        setAiQCount((c) => c + 1);
+      }
+      const transcriptOut = newMsgs.map((m) => ({ role: m.role, text: m.text }));
+      setMsgs(newMsgs);
+      if (clean) await speak(clean);
+      if (isFinalTurn) {
         const closingQs = getScriptedList(script, "closing");
         if (closingQs.length) {
           setPhase("closing");

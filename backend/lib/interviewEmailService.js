@@ -10,6 +10,9 @@ const {
   buildHrRejectEmail,
   buildReattemptApprovedEmail,
   buildReattemptRejectedEmail,
+  buildRescheduleByHrEmail,
+  buildRescheduleApprovedEmail,
+  buildRescheduleRejectedEmail,
   buildTalentPoolJoinEmail,
   buildCvAnalyserInviteEmail,
 } = require("./applicationEmail");
@@ -870,6 +873,224 @@ async function notifyPendingHrDecisionEmailsForCandidate(pool, candidateId) {
   return { ok: true, due: rows.rows.length, sent };
 }
 
+async function sendRescheduleApprovedEmail(pool, applicationId) {
+  if (!applicationId) {
+    return { skipped: true, reason: "missing_params" };
+  }
+
+  let appRes;
+  try {
+    appRes = await pool.query(
+      `SELECT a.id, a.candidate_id, a.job_id, a.reschedule_resolved_at,
+              a.reschedule_approved_email_sent_for
+       FROM application a
+       WHERE a.id = $1`,
+      [applicationId],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  const app = appRes.rows[0];
+  if (!app) {
+    return { skipped: true, reason: "not_found" };
+  }
+  if (!app.reschedule_resolved_at) {
+    return { skipped: true, reason: "not_resolved" };
+  }
+  if (reattemptEmailAlreadySent(app.reschedule_approved_email_sent_for, app.reschedule_resolved_at)) {
+    return { skipped: true, reason: "already_sent" };
+  }
+
+  const ctx = await loadApplicationContext(
+    pool,
+    app.candidate_id,
+    app.job_id,
+    app.id,
+  );
+  if (!ctx?.candidateEmail) {
+    return { skipped: true, reason: "not_found" };
+  }
+
+  const { subject, body } = buildRescheduleApprovedEmail({
+    candidateName: ctx.candidateName,
+    jobTitle: ctx.jobTitle,
+    interviewLink: ctx.interviewLink,
+  });
+
+  const result = await sendMail({
+    to: ctx.candidateEmail,
+    subject,
+    text: body,
+    context: "reschedule_approved",
+  });
+  if (result.skipped) return result;
+
+  try {
+    await pool.query(
+      `UPDATE application
+       SET reschedule_approved_email_sent_for = reschedule_resolved_at
+       WHERE id = $1`,
+      [app.id],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  return { ok: true, applicationId: app.id, type: "reschedule_approved" };
+}
+
+async function sendRescheduleRejectedEmail(pool, applicationId) {
+  if (!applicationId) {
+    return { skipped: true, reason: "missing_params" };
+  }
+
+  let appRes;
+  try {
+    appRes = await pool.query(
+      `SELECT a.id, a.candidate_id, a.job_id, a.reschedule_request_status,
+              a.reschedule_resolved_at, a.reschedule_rejected_email_sent_for
+       FROM application a
+       WHERE a.id = $1`,
+      [applicationId],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  const app = appRes.rows[0];
+  if (!app) {
+    return { skipped: true, reason: "not_found" };
+  }
+  if (app.reschedule_request_status !== "rejected") {
+    return { skipped: true, reason: "not_rejected" };
+  }
+  if (!app.reschedule_resolved_at) {
+    return { skipped: true, reason: "not_resolved" };
+  }
+  if (reattemptEmailAlreadySent(app.reschedule_rejected_email_sent_for, app.reschedule_resolved_at)) {
+    return { skipped: true, reason: "already_sent" };
+  }
+
+  const ctx = await loadApplicationContext(
+    pool,
+    app.candidate_id,
+    app.job_id,
+    app.id,
+  );
+  if (!ctx?.candidateEmail) {
+    return { skipped: true, reason: "not_found" };
+  }
+
+  const { subject, body } = buildRescheduleRejectedEmail({
+    candidateName: ctx.candidateName,
+    jobTitle: ctx.jobTitle,
+  });
+
+  const result = await sendMail({
+    to: ctx.candidateEmail,
+    subject,
+    text: body,
+    context: "reschedule_rejected",
+  });
+  if (result.skipped) return result;
+
+  try {
+    await pool.query(
+      `UPDATE application
+       SET reschedule_rejected_email_sent_for = reschedule_resolved_at
+       WHERE id = $1`,
+      [app.id],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  return { ok: true, applicationId: app.id, type: "reschedule_rejected" };
+}
+
+async function sendRescheduleByHrEmail(pool, applicationId) {
+  if (!applicationId) {
+    return { skipped: true, reason: "missing_params" };
+  }
+
+  let appRes;
+  try {
+    appRes = await pool.query(
+      `SELECT a.id, a.candidate_id, a.job_id, a.interview_scheduled_at,
+              a.interview_completed_at, a.reschedule_by_hr_email_sent_for
+       FROM application a
+       WHERE a.id = $1`,
+      [applicationId],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  const app = appRes.rows[0];
+  if (!app) {
+    return { skipped: true, reason: "not_found" };
+  }
+  if (!app.interview_scheduled_at) {
+    return { skipped: true, reason: "not_scheduled" };
+  }
+  if (app.interview_completed_at) {
+    return { skipped: true, reason: "interview_completed" };
+  }
+
+  const schedKey = new Date(app.interview_scheduled_at).toISOString();
+  const prev = app.reschedule_by_hr_email_sent_for
+    ? new Date(app.reschedule_by_hr_email_sent_for).toISOString()
+    : null;
+  if (prev === schedKey) {
+    return { skipped: true, reason: "already_sent_for_slot" };
+  }
+
+  const ctx = await loadApplicationContext(
+    pool,
+    app.candidate_id,
+    app.job_id,
+    app.id,
+  );
+  if (!ctx?.candidateEmail) {
+    return { skipped: true, reason: "not_found" };
+  }
+
+  const { subject, body } = buildRescheduleByHrEmail({
+    candidateName: ctx.candidateName,
+    jobTitle: ctx.jobTitle,
+    scheduledAt: app.interview_scheduled_at,
+    interviewLink: ctx.interviewLink,
+  });
+
+  const result = await sendMail({
+    to: ctx.candidateEmail,
+    subject,
+    text: body,
+    context: "reschedule_by_hr",
+  });
+  if (result.skipped) return result;
+
+  try {
+    await pool.query(
+      `UPDATE application
+       SET reschedule_by_hr_email_sent_for = $2::timestamptz
+       WHERE id = $1`,
+      [app.id, app.interview_scheduled_at],
+    );
+  } catch (e) {
+    if (e.code === "42703") return { skipped: true, reason: "migration_pending" };
+    throw e;
+  }
+
+  return { ok: true, applicationId: app.id, type: "reschedule_by_hr" };
+}
+
 async function sendCvAnalyserInviteEmail({
   candidateName,
   email,
@@ -912,5 +1133,8 @@ module.exports = {
   notifyPendingHrDecisionEmailsForCandidate,
   sendReattemptApprovedEmail,
   sendReattemptRejectedEmail,
+  sendRescheduleApprovedEmail,
+  sendRescheduleRejectedEmail,
+  sendRescheduleByHrEmail,
   sendCvAnalyserInviteEmail,
 };

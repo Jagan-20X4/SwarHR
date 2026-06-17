@@ -10,4 +10,9 @@ ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_requested_at TIMESTA
 ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_resolved_at TIMESTAMPTZ;
 ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_resolved_by_hr_id VARCHAR(64);
 
+-- Idempotency stamps so reschedule notification emails are not sent twice.
+ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_approved_email_sent_for TIMESTAMPTZ;
+ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_rejected_email_sent_for TIMESTAMPTZ;
+ALTER TABLE application ADD COLUMN IF NOT EXISTS reschedule_by_hr_email_sent_for TIMESTAMPTZ;
+
 COMMENT ON COLUMN application.reschedule_request_status IS 'none | pending | approved | rejected';

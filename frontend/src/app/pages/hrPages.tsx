@@ -5,6 +5,7 @@ import {
   patchLatestApp,
   patchApplicationById,
   transcriptLinesForApplication,
+  apiFetchInit,
 } from "@/legacy/helpersModule";
 import { HRBridge } from "@/features/hr/bridge/HRBridge";
 import { HRDash } from "@/features/hr/components/HRDash";
@@ -186,6 +187,10 @@ export function HrCandidateDetailPage() {
         const merged = { ...candidate, applicationHistory: nextHist };
         upd({ applicationHistory: nextHist });
         await patchCandidateForHr(candidate.id, merged);
+        void fetch(
+          `/api/admin/applications/${applicationId}/reschedule-notify`,
+          apiFetchInit({ method: "POST" }),
+        ).catch((err) => console.error("reschedule-notify email failed:", err));
       }}
       autoOpenReschedule={autoOpenReschedule}
       onBack={() => navigate("/hr")}
