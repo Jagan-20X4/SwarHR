@@ -452,6 +452,64 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
     return updated;
   }, []);
 
+  /** HR-only: persist jobs (and audit) to the server immediately and report the
+   *  result, instead of waiting for the 2s debounced auto-save. Used by Job Master
+   *  so a Save click is confirmed-on-server before showing "Saved". */
+  const saveJobsNow = useCallback(
+    async (jobsArg) => {
+      const r0 = localStorage.getItem(LS_ROLE);
+      if (r0 !== "hr") return { ok: false, error: "Only HR can save jobs." };
+      const nextJobs = Array.isArray(jobsArg) ? jobsArg : jobs;
+      cancelPendingSave();
+      skipAutoSaveRef.current = true;
+      setJobs(nextJobs);
+      try {
+        const r = await fetch(
+          "/api/state",
+          apiFetchInit({
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              jobs: nextJobs,
+              auditLog,
+              saveCandidates: false,
+            }),
+          }),
+        );
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          return { ok: false, error: t || `Save failed (${r.status}).` };
+        }
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: String(e?.message || e) };
+      }
+    },
+    [jobs, auditLog, cancelPendingSave],
+  );
+
+  /** Safety net: if the tab is hidden/closed while a debounced HR save is still
+   *  pending, flush it immediately so unsaved job/audit changes aren't lost. */
+  useEffect(() => {
+    const flush = () => {
+      if (!saveTimer.current) return;
+      if (localStorage.getItem(LS_ROLE) !== "hr") return;
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+      hrSavePayloadRef.current = { jobs, auditLog, saveCandidates: false };
+      void flushHrStateSave();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [jobs, auditLog, flushHrStateSave]);
+
   const active = candidates.find(c => c.id === activeId);
   const upd = useCallback(
     (u) => {
@@ -829,6 +887,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       candidateFirstName,
       syncStateFromServer,
       persistCandidateNow,
+      saveJobsNow,
       cancelPendingSave,
       refreshReattemptCount,
       refreshHrUsers,
@@ -889,6 +948,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       mergeCandidateInCache,
       fetchCandidateForHr,
       patchCandidateForHr,
+      saveJobsNow,
       upd,
       clearGuestJobApply,
       finalizeGuestJobApply,

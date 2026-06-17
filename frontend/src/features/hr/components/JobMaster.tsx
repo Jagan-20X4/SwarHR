@@ -7,7 +7,14 @@ import {
   MANDATORY_OPENING_DEFAULTS,
   MANDATORY_CLOSING_DEFAULTS,
 } from "@/constants/interviewQuestions";
-export function JobMaster({ jobs, onSave, onBack }) {
+export function JobMaster({ jobs, onSave, onSaveNow, onBack }) {
+  /* Persist to the server immediately and report success. Falls back to the
+   * in-memory update if no server-save handler was provided. */
+  const persistNow = async (nextJobs) => {
+    if (typeof onSaveNow === "function") return onSaveNow(nextJobs);
+    onSave(nextJobs);
+    return { ok: true };
+  };
   const MAX_ROLE_Q = 20;
   const MAX_OPEN_Q = 10;
   const MAX_CLOSE_Q = 5;
@@ -32,6 +39,7 @@ export function JobMaster({ jobs, onSave, onBack }) {
   const [questionRows, setQuestionRows] = useState(defaultNewQuestionRows);
   const [qErrors, setQErrors] = useState({});
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState("");
   const [removingId, setRemovingId] = useState(null);
   const normalizeRowsFromJob = (j) => {
@@ -79,7 +87,7 @@ export function JobMaster({ jobs, onSave, onBack }) {
       setRemovingId(null);
     }
   };
-  const saveJob = () => {
+  const saveJob = async () => {
     if (!form.title.trim()) return;
     const errs = {};
     const filled = [];
@@ -115,17 +123,25 @@ export function JobMaster({ jobs, onSave, onBack }) {
     }
     const interviewQuestions = filled.map((q, idx) => ({ ...q, displayOrder: idx + 1 }));
     const payload = { ...form, interviewQuestions };
-    if (edit === "new") {
-      setLocal((p) => [...p, { ...payload, id: "j-" + Date.now() }]);
-    } else {
-      setLocal((p) => p.map((j) => (j.id === edit ? { ...j, ...payload } : j)));
-    }
-    setToast(`Saved: ${openN} opening · ${roleN} role · ${closeN} closing.`);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2500);
-    setTimeout(() => setToast(""), 4000);
+    const nextLocal =
+      edit === "new"
+        ? [...local, { ...payload, id: "j-" + Date.now() }]
+        : local.map((j) => (j.id === edit ? { ...j, ...payload } : j));
+    setLocal(nextLocal);
     setEdit(null);
     setQErrors({});
+    setToast("Saving…");
+    setSaving(true);
+    const res = await persistNow(nextLocal);
+    setSaving(false);
+    if (res?.ok) {
+      setToast(`Saved: ${openN} opening · ${roleN} role · ${closeN} closing.`);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } else {
+      setToast(res?.error || "Could not save to server. Please try again.");
+    }
+    setTimeout(() => setToast(""), 4000);
   };
   const moveRow = (from, to) => {
     if (to < 0 || to >= questionRows.length) return;
@@ -214,8 +230,8 @@ export function JobMaster({ jobs, onSave, onBack }) {
   return (
     <div className="min-h-screen bg-slate-50">
       <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
-        <div className="flex items-center gap-3"><button type="button" onClick={() => { onSave(local); onBack(); }} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Job Master</span></div>
-        <button type="button" onClick={() => { onSave(local); setSaved(true); setTimeout(() => setSaved(false), 2000); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold ${saved ? "bg-green-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>{saved ? "✓ Saved" : "Save"}</button>
+        <div className="flex items-center gap-3"><button type="button" onClick={async () => { await persistNow(local); onBack(); }} className="text-slate-400 hover:text-white">← Back</button><span className="font-bold">Job Master</span></div>
+        <button type="button" disabled={saving} onClick={async () => { setSaving(true); setToast("Saving…"); const res = await persistNow(local); setSaving(false); if (res?.ok) { setSaved(true); setToast("All changes saved."); setTimeout(() => setSaved(false), 2000); } else { setToast(res?.error || "Could not save to server. Please try again."); } setTimeout(() => setToast(""), 4000); }} className={`px-4 py-1.5 rounded-lg text-sm font-bold disabled:opacity-60 ${saved ? "bg-green-600 text-white" : "bg-indigo-600 hover:bg-indigo-500 text-white"}`}>{saving ? "Saving…" : saved ? "✓ Saved" : "Save"}</button>
       </div>
       {toast ? <div className="bg-teal-600 text-white text-center text-sm py-2 font-semibold">{toast}</div> : null}
       <div className="max-w-4xl mx-auto px-6 py-8">
@@ -230,7 +246,7 @@ export function JobMaster({ jobs, onSave, onBack }) {
               {renderQuestionSection("role", "Role-specific (HR script)", "Asked after opening, before AI follow-ups.", true)}
               {renderQuestionSection("mandatory_close", "Mandatory closing", "Asked last after AI follow-ups.", true)}
             </div>
-            <div className="flex gap-3"><button type="button" onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg">Save</button><button type="button" onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
+            <div className="flex gap-3"><button type="button" disabled={saving} onClick={saveJob} className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg disabled:opacity-60">{saving ? "Saving…" : "Save"}</button><button type="button" onClick={() => setEdit(null)} className="px-6 py-2 border border-slate-200 text-slate-600 font-bold rounded-lg">Cancel</button></div>
           </div>
         )}
         <div className="space-y-4">{local.map((j) => <div key={j.id} className="bg-white rounded-xl border border-slate-200 p-5 flex items-start justify-between"><div><h3 className="font-bold text-slate-900">{j.title}</h3><p className="text-sm text-slate-500">{j.designation} · {j.location}</p>{(() => { const c = countJobQuestions(j); return c.open + c.role + c.close > 0 ? <p className="text-xs text-teal-700 font-semibold mt-1">{c.open} opening · {c.role} role · {c.close} closing</p> : null; })()}</div><div className="flex gap-2 ml-4 shrink-0"><button type="button" onClick={() => { setForm({ title: j.title, designation: j.designation || "", location: j.location || "", description: j.description || "", requirements: j.requirements || "" }); setQuestionRows(normalizeRowsFromJob(j)); setQErrors({}); setEdit(j.id); }} className="text-xs px-3 py-1.5 border border-slate-200 text-slate-600 font-bold rounded-lg">Edit</button><button type="button" disabled={removingId === j.id} onClick={() => removeJob(j)} className="text-xs px-3 py-1.5 border border-red-100 text-red-500 font-bold rounded-lg disabled:opacity-50 disabled:cursor-not-allowed">{removingId === j.id ? "Removing…" : "Remove"}</button></div></div>)}</div>

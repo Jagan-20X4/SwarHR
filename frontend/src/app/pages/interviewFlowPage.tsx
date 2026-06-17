@@ -156,6 +156,11 @@ export function InterviewFlowPage() {
           } catch (err) {
             console.error("Interview save failed:", err);
           }
+          /* Pull the recomputed status (cooling/locked/Under Review) so the
+           * portal and job board update without a manual page reload. */
+          try {
+            await syncStateFromServer();
+          } catch (_) {}
           setInterviewPhase("done");
         }}
       />

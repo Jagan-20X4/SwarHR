@@ -199,8 +199,15 @@ export function HrCandidateDetailPage() {
 }
 
 export function HrJobMasterPage() {
-  const { jobs, setJobs, navigate } = useAppState();
-  return <JobMaster jobs={jobs} onSave={setJobs} onBack={() => navigate("/hr")} />;
+  const { jobs, setJobs, saveJobsNow, navigate } = useAppState();
+  return (
+    <JobMaster
+      jobs={jobs}
+      onSave={setJobs}
+      onSaveNow={saveJobsNow}
+      onBack={() => navigate("/hr")}
+    />
+  );
 }
 
 export function HrScreeningPage() {
