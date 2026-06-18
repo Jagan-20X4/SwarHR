@@ -1742,6 +1742,113 @@ async function hrResetCandidatePassword(pool, candidateId, newPassword) {
   return { ok: true, candidateId };
 }
 
+const PASSWORD_RESET_TTL_MS = 10 * 60 * 1000;
+const PASSWORD_RESET_MAX_ATTEMPTS = 5;
+
+/**
+ * Creates a one-time 6-digit reset code for the candidate with this email.
+ * Returns { ok:false, reason:"not_found" } when no candidate matches — the
+ * caller surfaces this as an explicit "incorrect email" message.
+ */
+async function createCandidateResetCode(pool, email) {
+  const crypto = require("crypto");
+  const r = await pool.query(
+    "SELECT id, name, email FROM candidate WHERE lower(email) = lower($1)",
+    [String(email || "").trim()],
+  );
+  if (r.rows.length === 0) return { ok: false, reason: "not_found" };
+  const cand = r.rows[0];
+  const code = String(crypto.randomInt(0, 1000000)).padStart(6, "0");
+  const codeHash = await bcrypt.hash(code, 10);
+  const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MS);
+  await pool.query(
+    `UPDATE password_reset_code SET used = TRUE
+     WHERE candidate_id = $1 AND used = FALSE`,
+    [cand.id],
+  );
+  await pool.query(
+    `INSERT INTO password_reset_code (candidate_id, code_hash, expires_at)
+     VALUES ($1, $2, $3)`,
+    [cand.id, codeHash, expiresAt],
+  );
+  return {
+    ok: true,
+    code,
+    candidateId: cand.id,
+    name: cand.name,
+    email: cand.email,
+    expiresMinutes: Math.round(PASSWORD_RESET_TTL_MS / 60000),
+  };
+}
+
+/** Validates a reset code and sets the new password. */
+async function resetCandidatePasswordWithCode(pool, { email, code, newPassword }) {
+  const pw = String(newPassword || "");
+  if (pw.length < 8) {
+    return { ok: false, reason: "weak_password" };
+  }
+  const cleanCode = String(code || "").trim();
+  if (!/^\d{6}$/.test(cleanCode)) {
+    return { ok: false, reason: "invalid_code" };
+  }
+  const candRes = await pool.query(
+    "SELECT id FROM candidate WHERE lower(email) = lower($1)",
+    [String(email || "").trim()],
+  );
+  if (candRes.rows.length === 0) return { ok: false, reason: "invalid_code" };
+  const candidateId = candRes.rows[0].id;
+
+  const codeRes = await pool.query(
+    `SELECT id, code_hash, expires_at, used, attempts
+     FROM password_reset_code
+     WHERE candidate_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [candidateId],
+  );
+  if (codeRes.rows.length === 0) return { ok: false, reason: "invalid_code" };
+  const row = codeRes.rows[0];
+
+  if (row.used) return { ok: false, reason: "invalid_code" };
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    return { ok: false, reason: "expired" };
+  }
+  if (row.attempts >= PASSWORD_RESET_MAX_ATTEMPTS) {
+    await pool.query("UPDATE password_reset_code SET used = TRUE WHERE id = $1", [row.id]);
+    return { ok: false, reason: "too_many_attempts" };
+  }
+
+  const match = await bcrypt.compare(cleanCode, row.code_hash);
+  if (!match) {
+    await pool.query(
+      "UPDATE password_reset_code SET attempts = attempts + 1 WHERE id = $1",
+      [row.id],
+    );
+    return { ok: false, reason: "invalid_code" };
+  }
+
+  const hash = await bcrypt.hash(pw, 10);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      "UPDATE candidate SET password_hash = $1, updated_at = NOW() WHERE id = $2",
+      [hash, candidateId],
+    );
+    await client.query(
+      "UPDATE password_reset_code SET used = TRUE WHERE id = $1",
+      [row.id],
+    );
+    await client.query("COMMIT");
+  } catch (e) {
+    await client.query("ROLLBACK");
+    throw e;
+  } finally {
+    client.release();
+  }
+  return { ok: true, candidateId };
+}
+
 function coolingInfo(history, jobId, coolingMonths) {
   const cm = typeof coolingMonths === "number" ? coolingMonths : 3;
   const past = (history || []).filter((a) => a.jobId === jobId);
@@ -3044,6 +3151,8 @@ module.exports = {
   verifyCandidateLogin,
   verifyHrLogin,
   hrResetCandidatePassword,
+  createCandidateResetCode,
+  resetCandidatePasswordWithCode,
   listJobsApi,
   getCandidateMe,
   registerCandidate,

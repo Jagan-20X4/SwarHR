@@ -22,10 +22,13 @@ const {
   listJobsApi,
   getCandidateMe,
   registerCandidate,
+  createCandidateResetCode,
+  resetCandidatePasswordWithCode,
   getApplicationIdForJob,
   applyToJob,
   deleteJob,
 } = require("./stateRepo");
+const { sendMail } = require("./lib/mailer");
 const { createCvAnalyserRouter } = require("./routes/cvAnalyser");
 const {
   sendIntroInterviewEmail,
@@ -656,6 +659,90 @@ app.post(
     typ: "cand",
     body: { candidateId: out.candidateId, role: "candidate" },
   });
+  },
+);
+
+function buildPasswordResetEmail({ name, code, expiresMinutes }) {
+  const safeName = (name && String(name).trim()) || "Candidate";
+  const subject = "Your Indira IVF Careers password reset code";
+  const text =
+    `Hi ${safeName},\n\n` +
+    `Your password reset code is ${code}.\n` +
+    `It expires in ${expiresMinutes} minutes. Enter it on the reset screen to set a new password.\n\n` +
+    `If you didn't request this, you can ignore this email — your password stays unchanged.\n\n` +
+    `— Indira IVF Talent Acquisition`;
+  const html =
+    `<div style="font-family:Arial,Helvetica,sans-serif;max-width:480px;margin:auto;color:#1a1a2e">` +
+    `<h2 style="color:#dc3545;margin-bottom:8px">Password reset</h2>` +
+    `<p>Hi ${safeName},</p>` +
+    `<p>Use this code to reset your password:</p>` +
+    `<div style="font-size:32px;font-weight:800;letter-spacing:8px;background:#fff5f6;` +
+    `border:1px solid #f1c0c7;border-radius:12px;padding:16px;text-align:center;color:#dc3545">${code}</div>` +
+    `<p style="color:#555;font-size:14px">It expires in <strong>${expiresMinutes} minutes</strong>.</p>` +
+    `<p style="color:#888;font-size:12px">If you didn't request this, ignore this email — your password stays unchanged.</p>` +
+    `<p style="color:#555;font-size:13px">— Indira IVF Talent Acquisition</p>` +
+    `</div>`;
+  return { subject, text, html };
+}
+
+app.post(
+  "/api/auth/forgot-password",
+  dbReady,
+  rateLimit({ windowMs: 60_000, max: 5, keySuffix: "forgot-pw" }),
+  async (req, res) => {
+    const { email } = req.body || {};
+    if (!email || !String(email).trim()) {
+      res.status(400).json({ error: "email required" });
+      return;
+    }
+    const out = await createCandidateResetCode(pool, email);
+    if (!out.ok) {
+      res.status(404).json({ error: "No account found with that email" });
+      return;
+    }
+    const mail = buildPasswordResetEmail({
+      name: out.name,
+      code: out.code,
+      expiresMinutes: out.expiresMinutes,
+    });
+    try {
+      await sendMail({
+        to: out.email,
+        subject: mail.subject,
+        text: mail.text,
+        html: mail.html,
+        context: "password_reset",
+      });
+    } catch (e) {
+      res.status(502).json({ error: "Could not send the reset email. Try again shortly." });
+      return;
+    }
+    res.json({ ok: true });
+  },
+);
+
+app.post(
+  "/api/auth/reset-password",
+  dbReady,
+  rateLimit({ windowMs: 60_000, max: 10, keySuffix: "reset-pw" }),
+  async (req, res) => {
+    const { email, code, newPassword } = req.body || {};
+    if (!email || !code || !newPassword) {
+      res.status(400).json({ error: "email, code, and newPassword required" });
+      return;
+    }
+    const out = await resetCandidatePasswordWithCode(pool, { email, code, newPassword });
+    if (out.ok) {
+      res.json({ ok: true });
+      return;
+    }
+    const messages = {
+      weak_password: "Password must be at least 8 characters",
+      invalid_code: "Invalid or incorrect code",
+      expired: "This code has expired. Request a new one.",
+      too_many_attempts: "Too many attempts. Request a new code.",
+    };
+    res.status(400).json({ error: messages[out.reason] || "Could not reset password" });
   },
 );
 
